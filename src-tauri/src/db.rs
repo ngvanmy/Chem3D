@@ -40,7 +40,9 @@ pub fn init_db(app_handle: &tauri::AppHandle) -> Result<(), String> {
             logp REAL,
             boiling_point REAL,
             melting_point REAL,
-            functional_groups TEXT
+            functional_groups TEXT,
+            atoms_json TEXT,
+            bonds_json TEXT
         )",
         [],
     )
@@ -108,7 +110,9 @@ mod tests {
                 logp REAL,
                 boiling_point REAL,
                 melting_point REAL,
-                functional_groups TEXT
+                functional_groups TEXT,
+                atoms_json TEXT,
+                bonds_json TEXT
             )",
             [],
         )
