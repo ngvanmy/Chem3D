@@ -283,7 +283,7 @@ fn query_ai(
             let key: String = stmt
                 .query_row([], |row| row.get(0))
                 .map_err(|_| "Gemini API Key missing in settings.".to_string())?;
-            ai::call_gemini(&key, &prompt, &context)
+            ai::call_gemini(&key, &model, &prompt, &context)
         }
         "openai" => {
             let mut stmt = conn

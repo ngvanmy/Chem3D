@@ -47,7 +47,10 @@ pub struct OpenAIMessageResponse {
 }
 
 pub fn test_connection(endpoint: &str) -> Result<Vec<String>, String> {
-    let client = reqwest::blocking::Client::new();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
     let url = format!("{}/models", endpoint.trim_end_matches('/'));
 
     let res = client.get(&url).send().map_err(|e| e.to_string())?;
@@ -60,11 +63,26 @@ pub fn test_connection(endpoint: &str) -> Result<Vec<String>, String> {
     Ok(model_names)
 }
 
-pub fn call_gemini(api_key: &str, prompt: &str, context: &str) -> Result<String, String> {
-    let client = reqwest::blocking::Client::new();
+pub fn call_gemini(
+    api_key: &str,
+    model: &str,
+    prompt: &str,
+    context: &str,
+) -> Result<String, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let effective_model = if model.trim().is_empty() {
+        "gemini-2.5-flash"
+    } else {
+        model.trim()
+    };
+
     let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={}",
-        api_key
+        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+        effective_model, api_key
     );
 
     let full_prompt = format!("Context: {}\n\nQuestion: {}", context, prompt);
@@ -77,7 +95,8 @@ pub fn call_gemini(api_key: &str, prompt: &str, context: &str) -> Result<String,
         }]
     });
 
-    let res = client.post(&url)
+    let res = client
+        .post(&url)
         .json(&body)
         .send()
         .map_err(|e| e.to_string())?;
@@ -87,7 +106,9 @@ pub fn call_gemini(api_key: &str, prompt: &str, context: &str) -> Result<String,
     }
 
     let resp: GeminiResponse = res.json().map_err(|e| e.to_string())?;
-    let text = resp.candidates.first()
+    let text = resp
+        .candidates
+        .first()
         .and_then(|c| c.content.parts.first())
         .map(|p| p.text.clone())
         .ok_or_else(|| "Empty response from Gemini".to_string())?;
@@ -102,7 +123,10 @@ pub fn call_openai_compatible(
     prompt: &str,
     context: &str,
 ) -> Result<String, String> {
-    let client = reqwest::blocking::Client::new();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
     let url = format!("{}/chat/completions", endpoint.trim_end_matches('/'));
 
     let full_prompt = format!("Context: {}\n\nQuestion: {}", context, prompt);
@@ -134,7 +158,9 @@ pub fn call_openai_compatible(
     }
 
     let resp: OpenAIResponse = res.json().map_err(|e| e.to_string())?;
-    let text = resp.choices.first()
+    let text = resp
+        .choices
+        .first()
         .map(|c| c.message.content.clone())
         .ok_or_else(|| "Empty message choice from AI model".to_string())?;
 
