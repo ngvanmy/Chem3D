@@ -1,5 +1,6 @@
 pub mod db;
 pub mod pubchem;
+pub mod chemistry;
 
 use db::{get_db_path, init_db};
 use pubchem::{fetch_from_pubchem, CompoundData};
@@ -52,12 +53,53 @@ fn search_compound(app_handle: tauri::AppHandle, query: String) -> Result<Compou
         })
     });
 
-    if let Ok(compound) = local_res {
+    if let Ok(mut compound) = local_res {
+        if compound.functional_groups.is_empty() {
+            compound.functional_groups = chemistry::detect_functional_groups(&compound.smiles);
+        }
+        if compound.atoms.is_empty() {
+            let (atoms, bonds) = chemistry::generate_fallback_coordinates(&compound.smiles);
+            compound.atoms = atoms;
+            compound.bonds = bonds;
+        }
         return Ok(compound);
     }
 
-    // 3. Crawler PubChem
-    let mut pubchem_comp = fetch_from_pubchem(&query)?;
+    // 3. Crawler PubChem or offline fallback
+    let mut pubchem_comp = match fetch_from_pubchem(&query) {
+        Ok(comp) => comp,
+        Err(err) => {
+            // Offline fallback if query can generate atoms & bonds from SMILES pattern
+            let (atoms, bonds) = chemistry::generate_fallback_coordinates(&query);
+            if atoms.is_empty() {
+                return Err(err);
+            }
+            CompoundData {
+                id: 0,
+                canonical_name: query.clone(),
+                common_name: query.clone(),
+                formula: "".to_string(),
+                smiles: query.clone(),
+                mw: 0.0,
+                logp: None,
+                boiling_point: None,
+                melting_point: None,
+                functional_groups: vec![],
+                atoms,
+                bonds,
+            }
+        }
+    };
+
+    // Ensure functional groups and atoms/bonds are populated
+    if pubchem_comp.functional_groups.is_empty() {
+        pubchem_comp.functional_groups = chemistry::detect_functional_groups(&pubchem_comp.smiles);
+    }
+    if pubchem_comp.atoms.is_empty() {
+        let (atoms, bonds) = chemistry::generate_fallback_coordinates(&pubchem_comp.smiles);
+        pubchem_comp.atoms = atoms;
+        pubchem_comp.bonds = bonds;
+    }
 
     // 4. Save to Database
     conn.execute(
