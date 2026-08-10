@@ -6,6 +6,42 @@ use db::{get_db_path, init_db};
 use pubchem::{fetch_from_pubchem, CompoundData};
 use rusqlite::{params, Connection};
 
+/// Helper function to check if a query string contains only valid SMILES characters
+pub fn is_smiles(query: &str) -> bool {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let chars: Vec<char> = trimmed.chars().collect();
+    let mut i = 0;
+    let mut has_atom = false;
+
+    while i < chars.len() {
+        let c = chars[i];
+        if c == 'C' && i + 1 < chars.len() && chars[i + 1] == 'l' {
+            has_atom = true;
+            i += 2;
+            continue;
+        }
+        if c == 'B' && i + 1 < chars.len() && chars[i + 1] == 'r' {
+            has_atom = true;
+            i += 2;
+            continue;
+        }
+
+        match c {
+            'C' | 'c' | 'N' | 'n' | 'O' | 'o' | 'S' | 's' | 'P' | 'p' | 'F' | 'H' | 'I' | 'B' => {
+                has_atom = true;
+            }
+            '=' | '#' | '(' | ')' | '[' | ']' | '-' | '+' | '@' | '/' | '\\' | '.' | '%' | '0'..='9' => {}
+            _ => return false,
+        }
+        i += 1;
+    }
+
+    has_atom
+}
+
 #[tauri::command]
 fn search_compound(app_handle: tauri::AppHandle, query: String) -> Result<CompoundData, String> {
     let db_path = get_db_path(&app_handle);
@@ -68,25 +104,28 @@ fn search_compound(app_handle: tauri::AppHandle, query: String) -> Result<Compou
     // 3. Crawler PubChem or offline fallback
     let mut pubchem_comp = match fetch_from_pubchem(&query) {
         Ok(comp) => comp,
-        Err(err) => {
-            // Offline fallback if query can generate atoms & bonds from SMILES pattern
-            let (atoms, bonds) = chemistry::generate_fallback_coordinates(&query);
-            if atoms.is_empty() {
-                return Err(err);
-            }
-            CompoundData {
-                id: 0,
-                canonical_name: query.clone(),
-                common_name: query.clone(),
-                formula: "".to_string(),
-                smiles: query.clone(),
-                mw: 0.0,
-                logp: None,
-                boiling_point: None,
-                melting_point: None,
-                functional_groups: vec![],
-                atoms,
-                bonds,
+        Err(_err) => {
+            if is_smiles(&query) {
+                let (atoms, bonds) = chemistry::generate_fallback_coordinates(&query);
+                CompoundData {
+                    id: 0,
+                    canonical_name: query.clone(),
+                    common_name: query.clone(),
+                    formula: "".to_string(),
+                    smiles: query.clone(),
+                    mw: 0.0,
+                    logp: None,
+                    boiling_point: None,
+                    melting_point: None,
+                    functional_groups: vec![],
+                    atoms,
+                    bonds,
+                }
+            } else {
+                return Err(format!(
+                    "Offline: Could not find compound '{}' locally and cannot search PubChem.",
+                    query
+                ));
             }
         }
     };
@@ -335,6 +374,19 @@ mod tests {
         let query_partial = "H2";
         let res_partial = stmt.query_row(params![format!("%{}%", query_partial), query_partial], |_| Ok(()));
         assert!(res_partial.is_err());
+    }
+
+    #[test]
+    fn test_is_smiles_distinguishes_names_and_smiles() {
+        assert!(is_smiles("CCO"));
+        assert!(is_smiles("CC(=O)O"));
+        assert!(is_smiles("c1ccccc1"));
+        assert!(is_smiles("ClCCBr"));
+        assert!(is_smiles("C#N"));
+        assert!(!is_smiles("Water"));
+        assert!(!is_smiles("Ethanol"));
+        assert!(!is_smiles("Aspirin"));
+        assert!(!is_smiles(""));
     }
 }
 
