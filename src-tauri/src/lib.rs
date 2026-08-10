@@ -1,6 +1,7 @@
 pub mod db;
 pub mod pubchem;
 pub mod chemistry;
+pub mod ai;
 
 use db::{get_db_path, init_db};
 use pubchem::{fetch_from_pubchem, CompoundData};
@@ -232,6 +233,91 @@ fn get_note(app_handle: tauri::AppHandle, compound_id: i32) -> Result<String, St
     }
 }
 
+#[tauri::command]
+fn save_setting(app_handle: tauri::AppHandle, key: String, value: String) -> Result<(), String> {
+    let db_path = get_db_path(&app_handle);
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)",
+        params![key, value],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn get_setting(app_handle: tauri::AppHandle, key: String) -> Result<String, String> {
+    let db_path = get_db_path(&app_handle);
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare("SELECT value FROM app_settings WHERE key = ?")
+        .map_err(|e| e.to_string())?;
+    let val: Result<String, rusqlite::Error> = stmt.query_row(params![key], |row| row.get(0));
+    match val {
+        Ok(v) => Ok(v),
+        Err(_) => Ok("".to_string()),
+    }
+}
+
+#[tauri::command]
+fn test_local_connection(endpoint: String) -> Result<Vec<String>, String> {
+    ai::test_connection(&endpoint)
+}
+
+#[tauri::command]
+fn query_ai(
+    app_handle: tauri::AppHandle,
+    provider: String,
+    prompt: String,
+    model: String,
+    context: String,
+) -> Result<String, String> {
+    let db_path = get_db_path(&app_handle);
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+
+    match provider.as_str() {
+        "gemini" => {
+            let mut stmt = conn
+                .prepare("SELECT value FROM app_settings WHERE key = 'gemini_api_key'")
+                .map_err(|e| e.to_string())?;
+            let key: String = stmt
+                .query_row([], |row| row.get(0))
+                .map_err(|_| "Gemini API Key missing in settings.".to_string())?;
+            ai::call_gemini(&key, &prompt, &context)
+        }
+        "openai" => {
+            let mut stmt = conn
+                .prepare("SELECT value FROM app_settings WHERE key = 'openai_api_key'")
+                .map_err(|e| e.to_string())?;
+            let key: String = stmt
+                .query_row([], |row| row.get(0))
+                .map_err(|_| "OpenAI API Key missing in settings.".to_string())?;
+            ai::call_openai_compatible(
+                "https://api.openai.com/v1",
+                Some(&key),
+                &model,
+                &prompt,
+                &context,
+            )
+        }
+        "local" => {
+            let mut stmt_url = conn
+                .prepare("SELECT value FROM app_settings WHERE key = 'local_ai_url'")
+                .map_err(|e| e.to_string())?;
+            let raw_url: String = stmt_url
+                .query_row([], |row| row.get(0))
+                .unwrap_or_else(|_| "http://localhost:11434/v1".to_string());
+            let url = if raw_url.trim().is_empty() {
+                "http://localhost:11434/v1".to_string()
+            } else {
+                raw_url
+            };
+            ai::call_openai_compatible(&url, None, &model, &prompt, &context)
+        }
+        _ => Err("Invalid AI Provider".to_string()),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -244,7 +330,11 @@ pub fn run() {
             search_compound,
             get_search_history,
             save_note,
-            get_note
+            get_note,
+            save_setting,
+            get_setting,
+            test_local_connection,
+            query_ai
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
