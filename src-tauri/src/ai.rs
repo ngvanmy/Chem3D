@@ -124,7 +124,7 @@ pub fn call_openai_compatible(
     context: &str,
 ) -> Result<String, String> {
     let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(180))
         .build()
         .map_err(|e| e.to_string())?;
     let url = format!("{}/chat/completions", endpoint.trim_end_matches('/'));
