@@ -389,6 +389,8 @@ fn get_autocomplete_suggestions(app_handle: tauri::AppHandle, query: String) -> 
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             init_db(app.handle()).expect("Failed to initialize database");
             Ok(())

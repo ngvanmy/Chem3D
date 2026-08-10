@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { check } from '@tauri-apps/plugin-updater';
+import { relaunch } from '@tauri-apps/plugin-process';
 
 interface SettingsProps {
   onClose: () => void;
@@ -12,6 +14,9 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
   const [localModel, setLocalModel] = useState('');
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [statusMsg, setStatusMsg] = useState('');
+  const [updateChecking, setUpdateChecking] = useState(false);
+  const [updateStatus, setUpdateStatus] = useState('');
+
 
   useEffect(() => {
     const loadSettings = async () => {
@@ -56,6 +61,49 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
       setStatusMsg('Kết nối thất bại: ' + err.toString());
     }
   };
+
+  const handleCheckUpdate = async () => {
+    setUpdateChecking(true);
+    setUpdateStatus('Đang kiểm tra...');
+    try {
+      const update = await check();
+      if (update) {
+        setUpdateStatus(`Có phiên bản mới: ${update.version}! Đang tải xuống...`);
+        let downloaded = 0;
+        let contentLength = 0;
+        await update.downloadAndInstall((event) => {
+          switch (event.event) {
+            case 'Started':
+              contentLength = event.data.contentLength || 0;
+              setUpdateStatus('Bắt đầu tải cập nhật...');
+              break;
+            case 'Progress':
+              downloaded += event.data.chunkLength;
+              if (contentLength) {
+                const percent = Math.round((downloaded / contentLength) * 100);
+                setUpdateStatus(`Đang tải: ${percent}%`);
+              } else {
+                setUpdateStatus(`Đang tải: ${Math.round(downloaded / 1024)} KB`);
+              }
+              break;
+            case 'Finished':
+              setUpdateStatus('Tải hoàn tất! Đang chuẩn bị khởi động lại...');
+              break;
+          }
+        });
+        setUpdateStatus('Cập nhật hoàn tất! Đang khởi động lại...');
+        await relaunch();
+      } else {
+        setUpdateStatus('Ứng dụng đã ở phiên bản mới nhất!');
+      }
+    } catch (err: any) {
+      setUpdateStatus('Lỗi cập nhật: ' + err.toString());
+      console.error(err);
+    } finally {
+      setUpdateChecking(false);
+    }
+  };
+
 
   return (
     <div className="bg-slate-900 border border-slate-800 p-6 rounded-2xl w-full max-w-lg mx-auto">
@@ -124,6 +172,21 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
             />
           )}
         </div>
+
+        <div className="border-t border-slate-800 pt-4">
+          <label className="block text-sm text-slate-400 mb-1">Cập nhật Ứng dụng</label>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={handleCheckUpdate}
+              disabled={updateChecking}
+              className="bg-slate-800 hover:bg-slate-700 border border-slate-700 disabled:opacity-50 px-4 py-2 rounded-lg text-sm font-semibold transition"
+            >
+              Kiểm tra cập nhật
+            </button>
+            {updateStatus && <span className="text-xs text-emerald-400">{updateStatus}</span>}
+          </div>
+        </div>
+
 
         <div className="flex gap-3 pt-4 justify-end">
           <button
