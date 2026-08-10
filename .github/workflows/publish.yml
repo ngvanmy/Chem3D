@@ -30,11 +30,33 @@ jobs:
       - name: Install frontend dependencies
         run: npm install
 
+      - name: Normalize updater signing key format
+        shell: pwsh
+        env:
+          RAW_TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          $key = $env:RAW_TAURI_SIGNING_PRIVATE_KEY
+          if (-not $key) {
+            throw "TAURI_SIGNING_PRIVATE_KEY secret is missing."
+          }
+
+          $key = $key.Replace('\r\n', "`n").Replace('\n', "`n").Replace("`r`n", "`n")
+
+          if (-not $key.StartsWith('untrusted comment:')) {
+            $key = "untrusted comment: minisign encrypted secret key`n$key"
+          }
+
+          @"
+          TAURI_SIGNING_PRIVATE_KEY<<EOF
+          $key
+          EOF
+          "@ | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Build and release Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ env.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: v__VERSION__
