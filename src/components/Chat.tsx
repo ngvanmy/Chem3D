@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 
 interface Message {
@@ -17,22 +17,6 @@ export const Chat: React.FC<ChatProps> = ({ currentCompoundContext }) => {
   const [input, setInput] = useState('');
   const [provider, setProvider] = useState<'gemini' | 'openai' | 'local'>('local');
   const [loading, setLoading] = useState(false);
-  const [localModel, setLocalModel] = useState('');
-  const [openaiModel, setOpenaiModel] = useState('');
-
-  useEffect(() => {
-    const loadSavedModels = async () => {
-      try {
-        const lModel = await invoke<string>('get_setting', { key: 'local_ai_model' });
-        const oModel = await invoke<string>('get_setting', { key: 'openai_model' });
-        if (lModel) setLocalModel(lModel);
-        if (oModel) setOpenaiModel(oModel);
-      } catch (err) {
-        console.error(err);
-      }
-    };
-    loadSavedModels();
-  }, []);
 
   const sendMessage = async () => {
     if (!input.trim() || loading) return;
@@ -42,17 +26,10 @@ export const Chat: React.FC<ChatProps> = ({ currentCompoundContext }) => {
     setLoading(true);
 
     try {
-      let activeModel = '';
-      if (provider === 'local') {
-        activeModel = localModel;
-      } else if (provider === 'openai') {
-        activeModel = openaiModel;
-      }
-
       const reply = await invoke<string>('query_ai', {
         provider,
         prompt: userMsg,
-        model: activeModel,
+        model: '', // Empty model allows backend to query the latest settings dynamically
         context: currentCompoundContext
       });
 
@@ -63,6 +40,7 @@ export const Chat: React.FC<ChatProps> = ({ currentCompoundContext }) => {
       setLoading(false);
     }
   };
+
 
   const askAboutCompound = () => {
     setInput('Giải thích cho tôi các tính chất hóa học và độ hoạt động của chất này.');
