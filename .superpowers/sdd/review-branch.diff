@@ -1,0 +1,256 @@
+# Review package: empty..c4648d8
+
+## Commits
+c4648d8 fix(frontend): resolve model query param error and search error state reset
+6bb604d feat: complete modern dark premium UI/UX frontend with chat & settings
+50143be fix(ai): add request timeout and dynamic model support for Gemini client
+4ee22da feat: integrate Cloud AI and Ollama/LM Studio client proxies
+88c8fd7 fix(tauri): distinguish compound names vs SMILES when offline
+8261119 feat: implement local SMILES functional group parser and offline coordinate generator
+315c83f fix(db): resolve reviewer findings for Task 2 SQLite caching and queries
+c26ac1a feat: integrate SQLite DB schema and PubChem crawler
+c012344 fix: resolve package placeholders and configuration naming
+27881dc feat: init tauri app with threejs molecule viewer
+
+
+## Files changed
+commit c4648d86f98b753a7533091bb348d272c5aff5a6
+Author: Nguyễn Văn Mỹ <ngvanmy114@gmail.com>
+Date:   Mon Aug 10 16:23:29 2026 +0700
+
+    fix(frontend): resolve model query param error and search error state reset
+
+ src-tauri/src/lib.rs    | 70 +++++++++++++++++++++++++++++++++++++++++++++++--
+ src/App.tsx             |  1 +
+ src/components/Chat.tsx | 26 ++++++++++++++++--
+ 3 files changed, 93 insertions(+), 4 deletions(-)
+
+
+## Diff
+commit c4648d86f98b753a7533091bb348d272c5aff5a6
+Author: Nguyễn Văn Mỹ <ngvanmy114@gmail.com>
+Date:   Mon Aug 10 16:23:29 2026 +0700
+
+    fix(frontend): resolve model query param error and search error state reset
+
+diff --git a/src-tauri/src/lib.rs b/src-tauri/src/lib.rs
+index 3d7f942..22b9658 100644
+--- a/src-tauri/src/lib.rs
++++ b/src-tauri/src/lib.rs
+@@ -285,41 +285,69 @@ fn query_ai(
+                 .map_err(|_| "Gemini API Key missing in settings.".to_string())?;
+             ai::call_gemini(&key, &model, &prompt, &context)
+         }
+         "openai" => {
+             let mut stmt = conn
+                 .prepare("SELECT value FROM app_settings WHERE key = 'openai_api_key'")
+                 .map_err(|e| e.to_string())?;
+             let key: String = stmt
+                 .query_row([], |row| row.get(0))
+                 .map_err(|_| "OpenAI API Key missing in settings.".to_string())?;
++
++            let model_name = if model.trim().is_empty() {
++                let mut stmt_model = conn
++                    .prepare("SELECT value FROM app_settings WHERE key = 'openai_model'")
++                    .map_err(|e| e.to_string())?;
++                let saved: Result<String, _> = stmt_model.query_row([], |row| row.get(0));
++                match saved {
++                    Ok(m) if !m.trim().is_empty() => m,
++                    _ => "gpt-4o-mini".to_string(),
++                }
++            } else {
++                model
++            };
++
+             ai::call_openai_compatible(
+                 "https://api.openai.com/v1",
+                 Some(&key),
+-                &model,
++                &model_name,
+                 &prompt,
+                 &context,
+             )
+         }
+         "local" => {
+             let mut stmt_url = conn
+                 .prepare("SELECT value FROM app_settings WHERE key = 'local_ai_url'")
+                 .map_err(|e| e.to_string())?;
+             let raw_url: String = stmt_url
+                 .query_row([], |row| row.get(0))
+                 .unwrap_or_else(|_| "http://localhost:11434/v1".to_string());
+             let url = if raw_url.trim().is_empty() {
+                 "http://localhost:11434/v1".to_string()
+             } else {
+                 raw_url
+             };
+-            ai::call_openai_compatible(&url, None, &model, &prompt, &context)
++
++            let model_name = if model.trim().is_empty() {
++                let mut stmt_model = conn
++                    .prepare("SELECT value FROM app_settings WHERE key = 'local_ai_model'")
++                    .map_err(|e| e.to_string())?;
++                let saved: Result<String, _> = stmt_model.query_row([], |row| row.get(0));
++                match saved {
++                    Ok(m) if !m.trim().is_empty() => m,
++                    _ => "llama3".to_string(),
++                }
++            } else {
++                model
++            };
++
++            ai::call_openai_compatible(&url, None, &model_name, &prompt, &context)
+         }
+         _ => Err("Invalid AI Provider".to_string()),
+     }
+ }
+ 
+ #[cfg_attr(mobile, tauri::mobile_entry_point)]
+ pub fn run() {
+     tauri::Builder::default()
+         .plugin(tauri_plugin_opener::init())
+         .setup(|app| {
+@@ -471,12 +499,50 @@ mod tests {
+         assert!(is_smiles("CCO"));
+         assert!(is_smiles("CC(=O)O"));
+         assert!(is_smiles("c1ccccc1"));
+         assert!(is_smiles("ClCCBr"));
+         assert!(is_smiles("C#N"));
+         assert!(!is_smiles("Water"));
+         assert!(!is_smiles("Ethanol"));
+         assert!(!is_smiles("Aspirin"));
+         assert!(!is_smiles(""));
+     }
++
++    #[test]
++    fn test_model_fallback_resolution() {
++        let conn = Connection::open_in_memory().unwrap();
++        conn.execute(
++            "CREATE TABLE app_settings (
++                key TEXT PRIMARY KEY,
++                value TEXT NOT NULL
++            )",
++            [],
++        )
++        .unwrap();
++
++        // 1. Without saved setting -> default to llama3
++        let saved: Result<String, _> = conn.query_row(
++            "SELECT value FROM app_settings WHERE key = 'local_ai_model'",
++            [],
++            |row| row.get(0),
++        );
++        let resolved_local = match saved {
++            Ok(m) if !m.trim().is_empty() => m,
++            _ => "llama3".to_string(),
++        };
++        assert_eq!(resolved_local, "llama3");
++
++        // 2. With saved setting -> resolve saved model
++        conn.execute("INSERT INTO app_settings (key, value) VALUES ('local_ai_model', 'phi3')", []).unwrap();
++        let saved_2: Result<String, _> = conn.query_row(
++            "SELECT value FROM app_settings WHERE key = 'local_ai_model'",
++            [],
++            |row| row.get(0),
++        );
++        let resolved_local_2 = match saved_2 {
++            Ok(m) if !m.trim().is_empty() => m,
++            _ => "llama3".to_string(),
++        };
++        assert_eq!(resolved_local_2, "phi3");
++    }
+ }
+ 
+diff --git a/src/App.tsx b/src/App.tsx
+index 039eb25..e210169 100644
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -46,20 +46,21 @@ function App() {
+     setErrorMsg('');
+     try {
+       const data = await invoke<CompoundData>('search_compound', { query: searchQuery });
+       setCompound(data);
+       loadHistory();
+       
+       // Load note for this compound
+       const savedNote = await invoke<string>('get_note', { compoundId: data.id });
+       setNote(savedNote);
+     } catch (err: any) {
++      setCompound(null);
+       setErrorMsg('Không tìm thấy hợp chất: ' + err.toString());
+     } finally {
+       setLoading(false);
+     }
+   };
+ 
+   const handleSaveNote = async () => {
+     if (!compound) return;
+     try {
+       await invoke('save_note', { compoundId: compound.id, note: note });
+diff --git a/src/components/Chat.tsx b/src/components/Chat.tsx
+index ee63f90..42edb35 100644
+--- a/src/components/Chat.tsx
++++ b/src/components/Chat.tsx
+@@ -1,39 +1,61 @@
+-import React, { useState } from 'react';
++import React, { useState, useEffect } from 'react';
+ import { invoke } from '@tauri-apps/api/core';
+ 
+ interface Message {
+   role: 'user' | 'assistant';
+   content: string;
+ }
+ 
+ interface ChatProps {
+   currentCompoundContext: string;
+ }
+ 
+ export const Chat: React.FC<ChatProps> = ({ currentCompoundContext }) => {
+   const [messages, setMessages] = useState<Message[]>([
+     { role: 'assistant', content: 'Xin chào! Tôi có thể giải thích gì cho bạn về các hợp chất hóa học hôm nay?' }
+   ]);
+   const [input, setInput] = useState('');
+   const [provider, setProvider] = useState<'gemini' | 'openai' | 'local'>('local');
+   const [loading, setLoading] = useState(false);
++  const [localModel, setLocalModel] = useState('');
++  const [openaiModel, setOpenaiModel] = useState('');
++
++  useEffect(() => {
++    const loadSavedModels = async () => {
++      try {
++        const lModel = await invoke<string>('get_setting', { key: 'local_ai_model' });
++        const oModel = await invoke<string>('get_setting', { key: 'openai_model' });
++        if (lModel) setLocalModel(lModel);
++        if (oModel) setOpenaiModel(oModel);
++      } catch (err) {
++        console.error(err);
++      }
++    };
++    loadSavedModels();
++  }, []);
+ 
+   const sendMessage = async () => {
+     if (!input.trim() || loading) return;
+     const userMsg = input;
+     setInput('');
+     setMessages((prev) => [...prev, { role: 'user', content: userMsg }]);
+     setLoading(true);
+ 
+     try {
+-      const activeModel = provider === 'openai' ? 'gpt-4o' : '';
++      let activeModel = '';
++      if (provider === 'local') {
++        activeModel = localModel;
++      } else if (provider === 'openai') {
++        activeModel = openaiModel;
++      }
++
+       const reply = await invoke<string>('query_ai', {
+         provider,
+         prompt: userMsg,
+         model: activeModel,
+         context: currentCompoundContext
+       });
+ 
+       setMessages((prev) => [...prev, { role: 'assistant', content: reply }]);
+     } catch (err: any) {
+       setMessages((prev) => [...prev, { role: 'assistant', content: `Lỗi: ${err.toString()}` }]);

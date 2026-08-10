@@ -1,0 +1,2468 @@
+# Review package: c012344..315c83f
+
+## Commits
+315c83f fix(db): resolve reviewer findings for Task 2 SQLite caching and queries
+c26ac1a feat: integrate SQLite DB schema and PubChem crawler
+
+
+## Files changed
+ .superpowers/sdd/task-2-brief.md  | 435 ++++++++++++++++++++++++++++++++++
+ .superpowers/sdd/task-2-report.md |  71 ++++++
+ src-tauri/Cargo.lock              | 481 +++++++++++++++++++++++++++++++++++++-
+ src-tauri/Cargo.toml              |  13 +-
+ src-tauri/src/db.rs               | 163 +++++++++++++
+ src-tauri/src/lib.rs              | 292 ++++++++++++++++++++++-
+ src-tauri/src/pubchem.rs          | 204 ++++++++++++++++
+ 7 files changed, 1641 insertions(+), 18 deletions(-)
+
+
+## Diff
+diff --git a/.superpowers/sdd/task-2-brief.md b/.superpowers/sdd/task-2-brief.md
+new file mode 100644
+index 0000000..a26b1c2
+--- /dev/null
++++ b/.superpowers/sdd/task-2-brief.md
+@@ -0,0 +1,435 @@
++### Task 2: SQLite database integration & PubChem API crawler
++
++**Files:**
++- Create: `d:\Chem3D\src-tauri\src\db.rs`
++- Create: `d:\Chem3D\src-tauri\src\pubchem.rs`
++- Modify: `d:\Chem3D\src-tauri\Cargo.toml`, `d:\Chem3D\src-tauri\src\lib.rs`, `d:\Chem3D\src-tauri\src\main.rs`
++- Test: Write a Rust integration test or use Tauri invoke command to check database initialization and PubChem scraping.
++
++**Interfaces:**
++- Consumes: `MoleculeViewer` (renders the crawled structures)
++- Produces: Tauri Rust Commands:
++  - `pub fn search_compound(query: String) -> Result<CompoundData, String>`
++  - `pub fn get_search_history() -> Result<Vec<String>, String>`
++  - `pub fn save_note(compound_id: i32, note: String) -> Result<(), String>`
++  - `pub fn get_note(compound_id: i32) -> Result<String, String>`
++
++- [ ] **Step 1: Update Cargo.toml dependencies**
++
++Modify `d:\Chem3D\src-tauri\Cargo.toml` dependencies:
++```toml
++[dependencies]
++tauri = { version = "2.0.0", features = [] }
++serde = { version = "1.0", features = ["derive"] }
++serde_json = "1.0"
++rusqlite = { version = "0.31.0", features = ["bundled"] }
++reqwest = { version = "0.12", features = ["json", "blocking"] }
++```
++
++- [ ] **Step 2: Create DB module**
++
++Create `d:\Chem3D\src-tauri\src\db.rs`:
++```rust
++use rusqlite::{params, Connection, Result};
++use std::fs;
++use std::path::PathBuf;
++
++pub fn get_db_path(app_handle: &tauri::AppHandle) -> PathBuf {
++    let mut path = app_handle.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("."));
++    fs::create_dir_all(&path).ok();
++    path.push("chem3d.db");
++    path
++}
++
++pub fn init_db(app_handle: &tauri::AppHandle) -> Result<(), String> {
++    let path = get_db_path(app_handle);
++    let conn = Connection::open(&path).map_err(|e| e.to_string())?;
++
++    conn.execute(
++        "CREATE TABLE IF NOT EXISTS compounds (
++            id INTEGER PRIMARY KEY AUTOINCREMENT,
++            canonical_name TEXT UNIQUE NOT NULL,
++            common_name TEXT,
++            formula TEXT,
++            smiles TEXT UNIQUE NOT NULL,
++            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
++        )",
++        [],
++    ).map_err(|e| e.to_string())?;
++
++    conn.execute(
++        "CREATE TABLE IF NOT EXISTS properties (
++            id INTEGER PRIMARY KEY AUTOINCREMENT,
++            compound_id INTEGER UNIQUE REFERENCES compounds(id) ON DELETE CASCADE,
++            mw REAL,
++            logp REAL,
++            boiling_point REAL,
++            melting_point REAL,
++            functional_groups TEXT
++        )",
++        [],
++    ).map_err(|e| e.to_string())?;
++
++    conn.execute(
++        "CREATE TABLE IF NOT EXISTS user_notes (
++            id INTEGER PRIMARY KEY AUTOINCREMENT,
++            compound_id INTEGER UNIQUE REFERENCES compounds(id) ON DELETE CASCADE,
++            content TEXT,
++            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
++        )",
++        [],
++    ).map_err(|e| e.to_string())?;
++
++    conn.execute(
++        "CREATE TABLE IF NOT EXISTS search_history (
++            id INTEGER PRIMARY KEY AUTOINCREMENT,
++            query TEXT NOT NULL,
++            searched_at DATETIME DEFAULT CURRENT_TIMESTAMP
++        )",
++        [],
++    ).map_err(|e| e.to_string())?;
++
++    conn.execute(
++        "CREATE TABLE IF NOT EXISTS app_settings (
++            key TEXT PRIMARY KEY,
++            value TEXT
++        )",
++        [],
++    ).map_err(|e| e.to_string())?;
++
++    Ok(())
++}
++```
++
++- [ ] **Step 3: Create PubChem Crawler module**
++
++Create `d:\Chem3D\src-tauri\src\pubchem.rs`:
++```rust
++use serde::{Deserialize, Serialize};
++
++#[derive(Serialize, Deserialize, Clone, Debug)]
++pub struct AtomData {
++    pub element: String,
++    pub x: f64,
++    pub y: f64,
++    pub z: f64,
++}
++
++#[derive(Serialize, Deserialize, Clone, Debug)]
++pub struct BondData {
++    pub source: usize,
++    pub target: usize,
++    pub r#type: i32,
++}
++
++#[derive(Serialize, Deserialize, Clone, Debug)]
++pub struct CompoundData {
++    pub id: i32,
++    pub canonical_name: String,
++    pub common_name: String,
++    pub formula: String,
++    pub smiles: String,
++    pub mw: f64,
++    pub logp: Option<f64>,
++    pub boiling_point: Option<f64>,
++    pub melting_point: Option<f64>,
++    pub functional_groups: Vec<String>,
++    pub atoms: Vec<AtomData>,
++    pub bonds: Vec<BondData>,
++}
++
++#[derive(Deserialize)]
++struct PubChemPropRow {
++    #[serde(rename = "CID")]
++    cid: i64,
++    #[serde(rename = "CanonicalSMILES")]
++    smiles: Option<String>,
++    #[serde(rename = "MolecularFormula")]
++    formula: Option<String>,
++    #[serde(rename = "MolecularWeight")]
++    mw: Option<String>,
++    #[serde(rename = "IUPACName")]
++    iupac: Option<String>,
++}
++
++#[derive(Deserialize)]
++struct PubChemPropResponse {
++    #[serde(rename = "PropertyTable")]
++    property_table: PubChemPropTable,
++}
++
++#[derive(Deserialize)]
++struct PubChemPropTable {
++    #[serde(rename = "Properties")]
++    properties: Vec<PubChemPropRow>,
++}
++
++pub fn fetch_from_pubchem(query: &str) -> Result<CompoundData, String> {
++    let client = reqwest::blocking::Client::new();
++    let prop_url = format!(
++        "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/{}/property/CanonicalSMILES,MolecularFormula,MolecularWeight,IUPACName/JSON",
++        urlencoding::encode(query)
++    );
++
++    let res = client.get(&prop_url).send().map_err(|e| e.to_string())?;
++    if !res.status().is_success() {
++        return Err(format!("PubChem compound search failed with code {}", res.status()));
++    }
++    
++    let prop_data: PubChemPropResponse = res.json().map_err(|e| e.to_string())?;
++    let prop = prop_data.property_table.properties.first()
++        .ok_or_else(|| "No properties found for compound".to_string())?;
++
++    let cid = prop.cid;
++    let smiles = prop.smiles.clone().unwrap_or_default();
++    let formula = prop.formula.clone().unwrap_or_default();
++    let name = prop.iupac.clone().unwrap_or_else(|| query.to_string());
++    let mw = prop.mw.clone().unwrap_or_default().parse::<f64>().unwrap_or(0.0);
++
++    // Fetch 3D coordinates in SDF format
++    let sdf_url = format!(
++        "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{}/SDF?record_type=3d",
++        cid
++    );
++    let sdf_res = client.get(&sdf_url).send().map_err(|e| e.to_string())?;
++    let sdf_text = if sdf_res.status().is_success() {
++        sdf_res.text().unwrap_or_default()
++    } else {
++        "".to_string()
++    };
++
++    let (atoms, bonds) = parse_sdf(&sdf_text);
++
++    Ok(CompoundData {
++        id: 0,
++        canonical_name: name,
++        common_name: query.to_string(),
++        formula,
++        smiles,
++        mw,
++        logp: None,
++        boiling_point: None,
++        melting_point: None,
++        functional_groups: vec![],
++        atoms,
++        bonds,
++    })
++}
++
++fn parse_sdf(sdf: &str) -> (Vec<AtomData>, Vec<BondData>) {
++    let mut atoms = Vec::new();
++    let mut bonds = Vec::new();
++    let lines: Vec<&str> = sdf.lines().collect();
++    if lines.len() < 4 {
++        return (atoms, bonds);
++    }
++
++    // Line 4 contains the count of atoms and bonds
++    let count_line = lines[3];
++    if count_line.len() < 6 {
++        return (atoms, bonds);
++    }
++    let atom_count = count_line[0..3].trim().parse::<usize>().unwrap_or(0);
++    let bond_count = count_line[3..6].trim().parse::<usize>().unwrap_or(0);
++
++    let mut line_idx = 4;
++    for _ in 0..atom_count {
++        if line_idx >= lines.len() { break; }
++        let line = lines[line_idx];
++        if line.len() >= 34 {
++            let x = line[0..10].trim().parse::<f64>().unwrap_or(0.0);
++            let y = line[10..20].trim().parse::<f64>().unwrap_or(0.0);
++            let z = line[20..30].trim().parse::<f64>().unwrap_or(0.0);
++            let element = line[31..34].trim().to_string();
++            atoms.push(AtomData { element, x, y, z });
++        }
++        line_idx += 1;
++    }
++
++    for _ in 0..bond_count {
++        if line_idx >= lines.len() { break; }
++        let line = lines[line_idx];
++        if line.len() >= 9 {
++            let source = line[0..3].trim().parse::<usize>().unwrap_or(1) - 1;
++            let target = line[3..6].trim().parse::<usize>().unwrap_or(1) - 1;
++            let r#type = line[6..9].trim().parse::<i32>().unwrap_or(1);
++            bonds.push(BondData { source, target, r#type });
++        }
++        line_idx += 1;
++    }
++
++    (atoms, bonds)
++}
++```
++
++- [ ] **Step 4: Connect commands in lib.rs**
++
++Modify `d:\Chem3D\src-tauri\src\lib.rs`:
++```rust
++pub mod db;
++pub mod pubchem;
++
++use db::{get_db_path, init_db};
++use pubchem::{fetch_from_pubchem, CompoundData, AtomData, BondData};
++use rusqlite::{params, Connection};
++use std::sync::Mutex;
++use tauri::State;
++
++pub struct DbState {
++    pub conn_mutex: Mutex<Option<String>>, // Keep it simple and pass handle to query
++}
++
++#[tauri::command]
++fn search_compound(app_handle: tauri::AppHandle, query: String) -> Result<CompoundData, String> {
++    let db_path = get_db_path(&app_handle);
++    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
++
++    // 1. Save history query
++    conn.execute(
++        "INSERT INTO search_history (query) VALUES (?)",
++        params![query],
++    ).ok();
++
++    // 2. Query in local compounds DB first
++    let mut stmt = conn.prepare(
++        "SELECT c.id, c.canonical_name, c.common_name, c.formula, c.smiles, 
++                p.mw, p.logp, p.boiling_point, p.melting_point, p.functional_groups
++         FROM compounds c
++         LEFT JOIN properties p ON c.id = p.compound_id
++         WHERE c.canonical_name LIKE ?1 OR c.common_name LIKE ?1 OR c.formula = ?1"
++    ).map_err(|e| e.to_string())?;
++
++    let local_res = stmt.query_row(params![format!("%{}%", query)], |row| {
++        let f_groups_json: String = row.get(9).unwrap_or_else(|_| "[]".to_string());
++        let f_groups: Vec<String> = serde_json::from_str(&f_groups_json).unwrap_or_default();
++        Ok(CompoundData {
++            id: row.get(0)?,
++            canonical_name: row.get(1)?,
++            common_name: row.get(2)?,
++            formula: row.get(3)?,
++            smiles: row.get(4)?,
++            mw: row.get(5)?,
++            logp: row.get(6).ok(),
++            boiling_point: row.get(7).ok(),
++            melting_point: row.get(8).ok(),
++            functional_groups: f_groups,
++            atoms: vec![],
++            bonds: vec![],
++        })
++    });
++
++    if let Ok(mut compound) = local_res {
++        // Fetch PubChem fallback for 3D coordinates if missing in local query response
++        // Note: Coordinates are not saved to SQLite directly to save space, crawled dynamically if empty
++        if let Ok(pubchem_comp) = fetch_from_pubchem(&compound.canonical_name) {
++            compound.atoms = pubchem_comp.atoms;
++            compound.bonds = pubchem_comp.bonds;
++        }
++        return Ok(compound);
++    }
++
++    // 3. Crawler Pubchem
++    let mut pubchem_comp = fetch_from_pubchem(&query)?;
++
++    // 4. Save to Database
++    conn.execute(
++        "INSERT OR IGNORE INTO compounds (canonical_name, common_name, formula, smiles) VALUES (?, ?, ?, ?)",
++        params![pubchem_comp.canonical_name, pubchem_comp.common_name, pubchem_comp.formula, pubchem_comp.smiles],
++    ).map_err(|e| e.to_string())?;
++
++    let comp_id: i32 = conn.last_insert_rowid() as i32;
++    pubchem_comp.id = comp_id;
++
++    let f_groups_json = serde_json::to_string(&pubchem_comp.functional_groups).unwrap_or_else(|_| "[]".to_string());
++
++    conn.execute(
++        "INSERT OR IGNORE INTO properties (compound_id, mw, logp, boiling_point, melting_point, functional_groups) VALUES (?, ?, ?, ?, ?, ?)",
++        params![comp_id, pubchem_comp.mw, pubchem_comp.logp, pubchem_comp.boiling_point, pubchem_comp.melting_point, f_groups_json],
++    ).map_err(|e| e.to_string())?;
++
++    Ok(pubchem_comp)
++}
++
++#[tauri::command]
++fn get_search_history(app_handle: tauri::AppHandle) -> Result<Vec<String>, String> {
++    let db_path = get_db_path(&app_handle);
++    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
++    let mut stmt = conn.prepare("SELECT DISTINCT query FROM search_history ORDER BY searched_at DESC LIMIT 10").map_err(|e| e.to_string())?;
++    let rows = stmt.query_map([], |row| row.get(0)).map_err(|e| e.to_string())?;
++    let mut history = Vec::new();
++    for r in rows {
++        if let Ok(query) = r {
++            history.push(query);
++        }
++    }
++    Ok(history)
++}
++
++#[tauri::command]
++fn save_note(app_handle: tauri::AppHandle, compound_id: i32, content: String) -> Result<(), String> {
++    let db_path = get_db_path(&app_handle);
++    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
++    conn.execute(
++        "INSERT OR REPLACE INTO user_notes (compound_id, content, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
++        params![compound_id, content],
++    ).map_err(|e| e.to_string())?;
++    Ok(())
++}
++
++#[tauri::command]
++fn get_note(app_handle: tauri::AppHandle, compound_id: i32) -> Result<String, String> {
++    let db_path = get_db_path(&app_handle);
++    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
++    let mut stmt = conn.prepare("SELECT content FROM user_notes WHERE compound_id = ?").map_err(|e| e.to_string())?;
++    let note: Result<String, rusqlite::Error> = stmt.query_row(params![compound_id], |row| row.get(0));
++    match note {
++        Ok(content) => Ok(content),
++        Err(_) => Ok("".to_string()),
++    }
++}
++
++#[cfg_attr(mobile, tauri::mobile_entry_point)]
++pub fn run() {
++    tauri::Builder::default()
++        .setup(|app| {
++            init_db(app.handle()).expect("Failed to initialize database");
++            Ok(())
++        })
++        .invoke_handler(tauri::generate_handler![
++            search_compound,
++            get_search_history,
++            save_note,
++            get_note
++        ])
++        .run(tauri::generate_context!())
++        .expect("error while running tauri application");
++}
++```
++
++Modify `d:\Chem3D\src-tauri\src\main.rs` to point to `lib.rs`:
++```rust
++#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
++
++fn main() {
++    chem3d_lib::run();
++}
++```
++
++- [ ] **Step 5: Verify build & DB creation**
++
++Run:
++```powershell
++npm run tauri dev
++```
++Check if database `chem3d.db` is created in `$APP_DATA_DIR`. Under Windows, this is usually at `C:\Users\ngvan\AppData\Roaming\com.tauri.dev\chem3d.db` or similar.
++
++- [ ] **Step 6: Commit**
++
++Run:
++```powershell
++git add src-tauri
++git commit -m "feat: integrate SQLite db & PubChem Rest API crawler"
++```
++
++---
++
+diff --git a/.superpowers/sdd/task-2-report.md b/.superpowers/sdd/task-2-report.md
+new file mode 100644
+index 0000000..1fdfc4f
+--- /dev/null
++++ b/.superpowers/sdd/task-2-report.md
+@@ -0,0 +1,71 @@
++# Task 2 Implementation Report: SQLite Database Integration & PubChem API Crawler
++
++## Overview
++Task 2 connects the Tauri Rust backend to SQLite and implements the PubChem API crawler for fetching compound information and parsing 3D atomic coordinates dynamically.
++
++## Summary of Changes
++
++### 1. Updated Dependencies (`Cargo.toml`)
++- Added `rusqlite = { version = "0.31.0", features = ["bundled"] }` for embedded SQLite support.
++- Added `reqwest = { version = "0.12", features = ["json", "blocking"] }` for PubChem REST API requests.
++- Added `urlencoding = "2.1"` for safe URI encoding of chemical compound queries.
++
++### 2. Database Module (`src-tauri/src/db.rs`)
++- Created `get_db_path()` to resolve `$APP_DATA_DIR/chem3d.db` cross-platform.
++- Implemented `init_db()` creating 5 SQLite tables:
++  - `compounds`: `id`, `canonical_name`, `common_name`, `formula`, `smiles`, `created_at`
++  - `properties`: `id`, `compound_id`, `mw`, `logp`, `boiling_point`, `melting_point`, `functional_groups`
++  - `user_notes`: `id`, `compound_id`, `content`, `updated_at`
++  - `search_history`: `id`, `query`, `searched_at`
++  - `app_settings`: `key`, `value`
++- Added foreign key constraint enforcement (`PRAGMA foreign_keys = ON;`).
++- Added unit test `test_db_tables_creation()` validating table schemas.
++
++### 3. PubChem Crawler & SDF Parser (`src-tauri/src/pubchem.rs`)
++- Created data structures: `CompoundData`, `AtomData`, `BondData`, `PubChemPropRow`, `PubChemPropResponse`.
++- Implemented `fetch_from_pubchem(query)`:
++  - Fetches compound properties via PubChem PUG REST API (`/property/CanonicalSMILES,MolecularFormula,MolecularWeight,IUPACName/JSON`).
++  - Fetches 3D atomic coordinates and connectivity via PubChem SDF endpoint (`/SDF?record_type=3d`).
++- Implemented `parse_sdf(sdf)`:
++  - Parses V2000 SDF 3D coordinate lines using exact substring offsets:
++    - `x` (0..10), `y` (10..20), `z` (20..30), `element` (31..34).
++  - Parses bond indices (1-based converted to 0-based index) and bond types.
++- Added unit test `test_parse_sdf_sample()` for verifying 3D coordinate parsing.
++
++### 4. Tauri Command Layer (`src-tauri/src/lib.rs`)
++- Exposed 4 Tauri commands:
++  - `search_compound`: Checks local SQLite cache first. If not found, crawls PubChem REST API, saves compound to SQLite, and returns compound data with 3D coordinates.
++  - `get_search_history`: Queries recent search history from SQLite (`SELECT DISTINCT query FROM search_history ORDER BY id DESC LIMIT 10`).
++  - `save_note`: Saves or updates custom notes for a compound in SQLite (`user_notes` table).
++  - `get_note`: Retrieves custom note for a compound by `compound_id`.
++- Registered `init_db` in `.setup()` hook of Tauri builder.
++
++### 5. Entry Point (`src-tauri/src/main.rs`)
++- Main entry point configured to call `chem3d_lib::run()`.
++
++## Verification & Self-Review
++- Database schema matches design requirements: all 5 tables (`compounds`, `properties`, `user_notes`, `search_history`, `app_settings`) correctly defined.
++- PubChem REST API integration and SDF 3D coordinate parsing tested with unit tests.
++- SQLite path accurately configured to `$APP_DATA_DIR/chem3d.db`.
++
++## Fixes Applied (Reviewer Feedback Resolution)
++
++### 1. SQLite Coordinate Caching & Offline Fallback
++- Updated `properties` table schema in `src-tauri/src/db.rs` to include `atoms_json TEXT` and `bonds_json TEXT` columns.
++- Updated `search_compound` query in `src-tauri/src/lib.rs` to select `atoms_json` and `bonds_json` from `properties` and deserialize into `compound.atoms` and `compound.bonds`.
++- Removed redundant network call fallback `fetch_from_pubchem` inside the local DB cache hit block.
++- Updated compound property insertion logic to serialize `pubchem_comp.atoms` and `pubchem_comp.bonds` as JSON strings into `atoms_json` and `bonds_json`.
++
++### 2. Wildcard Binding Fix for Formula Matching
++- Fixed local query SQL parameter binding in `src-tauri/src/lib.rs`: bound wildcard `%query%` parameter `?1` for `canonical_name` and `common_name` LIKE searches, while binding exact `query` parameter `?2` for `formula = ?2`.
++
++### 3. `save_note` Interface Alignment
++- Modified `save_note` signature in `src-tauri/src/lib.rs` from `content: String` to `note: String` to match frontend interface specification.
++
++### 4. Search History Ordering Fix
++- Updated `get_search_history` query in `src-tauri/src/lib.rs` to `SELECT query FROM search_history GROUP BY query ORDER BY MAX(id) DESC LIMIT 10`.
++
++### 5. Added Unit Tests
++- `test_search_history_ordering_query`: Verifies recent search history deduplication and ordering by `MAX(id) DESC`.
++- `test_local_query_exact_formula_and_atoms_cache`: Verifies exact formula query matching and 3D coordinate serialization/deserialization.
++
+diff --git a/src-tauri/Cargo.lock b/src-tauri/Cargo.lock
+index 0cbe15a..dcc1d11 100644
+--- a/src-tauri/Cargo.lock
++++ b/src-tauri/Cargo.lock
+@@ -1,20 +1,32 @@
+ # This file is automatically @generated by Cargo.
+ # It is not intended for manual editing.
+ version = 4
+ 
+ [[package]]
+ name = "adler2"
+ version = "2.0.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
+ 
++[[package]]
++name = "ahash"
++version = "0.8.12"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75"
++dependencies = [
++ "cfg-if",
++ "once_cell",
++ "version_check",
++ "zerocopy",
++]
++
+ [[package]]
+ name = "aho-corasick"
+ version = "1.1.5"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "c982642fa9e8606056828ee9a8505737230110bb1099153c79efe865c59d12ba"
+ dependencies = [
+  "memchr",
+ ]
+ 
+ [[package]]
+@@ -450,25 +462,28 @@ dependencies = [
+ [[package]]
+ name = "cfg-if"
+ version = "1.0.4"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
+ 
+ [[package]]
+ name = "chem3d"
+ version = "0.1.0"
+ dependencies = [
++ "reqwest 0.12.28",
++ "rusqlite",
+  "serde",
+  "serde_json",
+  "tauri",
+  "tauri-build",
+  "tauri-plugin-opener",
++ "urlencoding",
+ ]
+ 
+ [[package]]
+ name = "chrono"
+ version = "0.4.45"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
+ dependencies = [
+  "iana-time-zone",
+  "num-traits",
+@@ -498,20 +513,30 @@ dependencies = [
+ [[package]]
+ name = "cookie"
+ version = "0.18.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "1a373e3602691c3cdea496d2f0ee5935151e6168fe87739483c463db1b2f2f87"
+ dependencies = [
+  "time",
+  "version_check",
+ ]
+ 
++[[package]]
++name = "core-foundation"
++version = "0.9.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "91e195e091a93c46f7102ec7818a2aa394e1e1771c3ab4825963fa03e45afb8f"
++dependencies = [
++ "core-foundation-sys",
++ "libc",
++]
++
+ [[package]]
+ name = "core-foundation"
+ version = "0.10.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "b2a6cd9ae233e7f62ba4e9353e81a88df7fc8a5987b8d445b4d90c879bd156f6"
+ dependencies = [
+  "core-foundation-sys",
+  "libc",
+ ]
+ 
+@@ -521,34 +546,34 @@ version = "0.8.7"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
+ 
+ [[package]]
+ name = "core-graphics"
+ version = "0.25.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "064badf302c3194842cf2c5d61f56cc88e54a759313879cdf03abdd27d0c3b97"
+ dependencies = [
+  "bitflags 2.13.1",
+- "core-foundation",
++ "core-foundation 0.10.1",
+  "core-graphics-types",
+- "foreign-types",
++ "foreign-types 0.5.0",
+  "libc",
+ ]
+ 
+ [[package]]
+ name = "core-graphics-types"
+ version = "0.2.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "3d44a101f213f6c4cdc1853d4b78aef6db6bdfa3468798cc1d9912f4735013eb"
+ dependencies = [
+  "bitflags 2.13.1",
+- "core-foundation",
++ "core-foundation 0.10.1",
+  "libc",
+ ]
+ 
+ [[package]]
+ name = "cpufeatures"
+ version = "0.2.17"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280"
+ dependencies = [
+  "libc",
+@@ -889,20 +914,29 @@ dependencies = [
+  "vswhom",
+  "winreg",
+ ]
+ 
+ [[package]]
+ name = "embed_plist"
+ version = "1.2.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "4ef6b89e5b37196644d8796de5268852ff179b44e96276cf4290264843743bb7"
+ 
++[[package]]
++name = "encoding_rs"
++version = "0.8.35"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "75030f3c4f45dafd7586dd6780965a8c7e8e285a5ecb86713e63a79c5b2766f3"
++dependencies = [
++ "cfg-if",
++]
++
+ [[package]]
+ name = "endi"
+ version = "1.1.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "66b7e2430c6dff6a955451e2cfc438f09cea1965a9d6f87f7e3b90decc014099"
+ 
+ [[package]]
+ name = "enumflags2"
+ version = "0.7.12"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -963,20 +997,32 @@ dependencies = [
+ [[package]]
+ name = "event-listener-strategy"
+ version = "0.5.4"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "8be9f3dfaaffdae2972880079a491a1a8bb7cbed0b8dd7a347f668b4150a3b93"
+ dependencies = [
+  "event-listener",
+  "pin-project-lite",
+ ]
+ 
++[[package]]
++name = "fallible-iterator"
++version = "0.3.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "2acce4a10f12dc2fb14a218589d4f1f62ef011b2d0cc4b3cb1bba8e94da14649"
++
++[[package]]
++name = "fallible-streaming-iterator"
++version = "0.1.9"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
++
+ [[package]]
+ name = "fastrand"
+ version = "2.5.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
+ 
+ [[package]]
+ name = "fdeflate"
+ version = "0.3.7"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -1016,41 +1062,56 @@ name = "fnv"
+ version = "1.0.7"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
+ 
+ [[package]]
+ name = "foldhash"
+ version = "0.2.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
+ 
++[[package]]
++name = "foreign-types"
++version = "0.3.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "f6f339eb8adc052cd2ca78910fda869aefa38d22d5cb648e6485e4d3fc06f3b1"
++dependencies = [
++ "foreign-types-shared 0.1.1",
++]
++
+ [[package]]
+ name = "foreign-types"
+ version = "0.5.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "d737d9aa519fb7b749cbc3b962edcf310a8dd1f4b67c91c4f83975dbdd17d965"
+ dependencies = [
+  "foreign-types-macros",
+- "foreign-types-shared",
++ "foreign-types-shared 0.3.1",
+ ]
+ 
+ [[package]]
+ name = "foreign-types-macros"
+ version = "0.2.4"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "ea5190182e6915eb873ddbc16e23b711b6eb1f9c00a0d0a3a91b5f6228475225"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+  "syn 3.0.3",
+ ]
+ 
++[[package]]
++name = "foreign-types-shared"
++version = "0.1.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "00b0228411908ca8685dba7fc2cdd70ec9990a6e753e89b6ac91a84c40fbaf4b"
++
+ [[package]]
+ name = "foreign-types-shared"
+ version = "0.3.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
+ 
+ [[package]]
+ name = "form_urlencoded"
+ version = "1.2.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -1059,20 +1120,21 @@ dependencies = [
+  "percent-encoding",
+ ]
+ 
+ [[package]]
+ name = "futures-channel"
+ version = "0.3.33"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "262590f4fe6afeb0bc83be1daa64e52657fe185690a958af7f3ad0e92085c5ae"
+ dependencies = [
+  "futures-core",
++ "futures-sink",
+ ]
+ 
+ [[package]]
+ name = "futures-core"
+ version = "0.3.33"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "2cd50c473c80f6d7c3670a752354b8e569b1a7cbfdc0419ec88e5edad85e0dc7"
+ 
+ [[package]]
+ name = "futures-executor"
+@@ -1427,32 +1489,69 @@ version = "0.18.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "52ff3c5b21f14f0736fed6dcfc0bfb4225ebf5725f3c0209edeec181e4d73e9d"
+ dependencies = [
+  "proc-macro-crate 1.3.1",
+  "proc-macro-error",
+  "proc-macro2",
+  "quote",
+  "syn 2.0.119",
+ ]
+ 
++[[package]]
++name = "h2"
++version = "0.4.15"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "6cb093c84e8bd9b188d4c4a8cb6579fc016968d14c99882163cd3ff402a4f155"
++dependencies = [
++ "atomic-waker",
++ "bytes",
++ "fnv",
++ "futures-core",
++ "futures-sink",
++ "http",
++ "indexmap 2.14.0",
++ "slab",
++ "tokio",
++ "tokio-util",
++ "tracing",
++]
++
+ [[package]]
+ name = "hashbrown"
+ version = "0.12.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "8a9ee70c43aaf417c914396645a0fa852624801b24ebb7ae78fe8272889ac888"
+ 
++[[package]]
++name = "hashbrown"
++version = "0.14.5"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
++dependencies = [
++ "ahash",
++]
++
+ [[package]]
+ name = "hashbrown"
+ version = "0.17.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+ 
++[[package]]
++name = "hashlink"
++version = "0.9.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "6ba4ff7128dee98c7dc9794b6a411377e1404dba1c97deb8d1a55297bd25d8af"
++dependencies = [
++ "hashbrown 0.14.5",
++]
++
+ [[package]]
+ name = "heck"
+ version = "0.4.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "95505c38b4572b2d910cecb0281560f54b440a19336cbbcb27bf6ce6adc6f5a8"
+ 
+ [[package]]
+ name = "heck"
+ version = "0.5.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -1522,51 +1621,85 @@ checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
+ [[package]]
+ name = "hyper"
+ version = "1.11.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "d22053281f852e11534f5198498373cbb59295120a20771d90f7ed1897490a72"
+ dependencies = [
+  "atomic-waker",
+  "bytes",
+  "futures-channel",
+  "futures-core",
++ "h2",
+  "http",
+  "http-body",
+  "httparse",
+  "itoa",
+  "pin-project-lite",
+  "smallvec",
+  "tokio",
+  "want",
+ ]
+ 
++[[package]]
++name = "hyper-rustls"
++version = "0.27.9"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "33ca68d021ef39cf6463ab54c1d0f5daf03377b70561305bb89a8f83aab66e0f"
++dependencies = [
++ "http",
++ "hyper",
++ "hyper-util",
++ "rustls",
++ "tokio",
++ "tokio-rustls",
++ "tower-service",
++]
++
++[[package]]
++name = "hyper-tls"
++version = "0.6.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "70206fc6890eaca9fde8a0bf71caa2ddfc9fe045ac9e5c70df101a7dbde866e0"
++dependencies = [
++ "bytes",
++ "http-body-util",
++ "hyper",
++ "hyper-util",
++ "native-tls",
++ "tokio",
++ "tokio-native-tls",
++ "tower-service",
++]
++
+ [[package]]
+ name = "hyper-util"
+ version = "0.1.20"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "96547c2556ec9d12fb1578c4eaf448b04993e7fb79cbaad930a656880a6bdfa0"
+ dependencies = [
+  "base64 0.22.1",
+  "bytes",
+  "futures-channel",
+  "futures-util",
+  "http",
+  "http-body",
+  "hyper",
+  "ipnet",
+  "libc",
+  "percent-encoding",
+  "pin-project-lite",
+  "socket2",
++ "system-configuration",
+  "tokio",
+  "tower-service",
+  "tracing",
++ "windows-registry",
+ ]
+ 
+ [[package]]
+ name = "iana-time-zone"
+ version = "0.1.65"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "e31bc9ad994ba00e440a8aa5c9ef0ec67d5cb5e5cb0cc7f8b744a35b389cc470"
+ dependencies = [
+  "android_system_properties",
+  "core-foundation-sys",
+@@ -1983,20 +2116,31 @@ dependencies = [
+ 
+ [[package]]
+ name = "libredox"
+ version = "0.1.19"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "2026a5056764a10b2bf5d56488cba40da507f5493a6a429340e2004d9ed085fa"
+ dependencies = [
+  "libc",
+ ]
+ 
++[[package]]
++name = "libsqlite3-sys"
++version = "0.28.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "0c10584274047cb335c23d3e61bcef8e323adae7c5c8c760540f73610177fc3f"
++dependencies = [
++ "cc",
++ "pkg-config",
++ "vcpkg",
++]
++
+ [[package]]
+ name = "linux-raw-sys"
+ version = "0.12.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
+ 
+ [[package]]
+ name = "litemap"
+ version = "0.8.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -2084,20 +2228,37 @@ dependencies = [
+  "objc2-app-kit",
+  "objc2-core-foundation",
+  "objc2-foundation",
+  "once_cell",
+  "png 0.18.1",
+  "serde",
+  "thiserror 2.0.20",
+  "windows-sys 0.61.2",
+ ]
+ 
++[[package]]
++name = "native-tls"
++version = "0.2.18"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "465500e14ea162429d264d44189adc38b199b62b1c21eea9f69e4b73cb03bbf2"
++dependencies = [
++ "libc",
++ "log",
++ "openssl",
++ "openssl-probe",
++ "openssl-sys",
++ "schannel",
++ "security-framework",
++ "security-framework-sys",
++ "tempfile",
++]
++
+ [[package]]
+ name = "ndk"
+ version = "0.9.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "c3f42e7bbe13d351b6bead8286a43aac9534b82bd3cc43e47037f012ebfd62d4"
+ dependencies = [
+  "bitflags 2.13.1",
+  "jni-sys 0.3.1",
+  "log",
+  "ndk-sys",
+@@ -2363,20 +2524,63 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+ name = "open"
+ version = "5.4.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "f9cfef937e9c486488c7e3d949ae31c0f1d06bdacd75b99c086cb35356e30408"
+ dependencies = [
+  "dunce",
+  "is-wsl",
+  "libc",
+ ]
+ 
++[[package]]
++name = "openssl"
++version = "0.10.81"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "77823a27f0babb03091cb9ed9ef80af3b39dbc82f97e8fa530374b7dafd87a45"
++dependencies = [
++ "bitflags 2.13.1",
++ "cfg-if",
++ "foreign-types 0.3.2",
++ "libc",
++ "openssl-macros",
++ "openssl-sys",
++]
++
++[[package]]
++name = "openssl-macros"
++version = "0.1.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "a948666b637a0f465e8564c73e89d4dde00d72d4d473cc972f390fc3dcee7d9c"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn 2.0.119",
++]
++
++[[package]]
++name = "openssl-probe"
++version = "0.2.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
++
++[[package]]
++name = "openssl-sys"
++version = "0.9.117"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b47e7e6bb2c38cd930d25a23b40fa52e068c10e85f3e03a7f5ba5aaca5713695"
++dependencies = [
++ "cc",
++ "libc",
++ "pkg-config",
++ "vcpkg",
++]
++
+ [[package]]
+ name = "option-ext"
+ version = "0.2.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
+ 
+ [[package]]
+ name = "ordered-stream"
+ version = "0.2.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -2771,20 +2975,62 @@ dependencies = [
+  "memchr",
+  "regex-syntax",
+ ]
+ 
+ [[package]]
+ name = "regex-syntax"
+ version = "0.8.11"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
+ 
++[[package]]
++name = "reqwest"
++version = "0.12.28"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
++dependencies = [
++ "base64 0.22.1",
++ "bytes",
++ "encoding_rs",
++ "futures-channel",
++ "futures-core",
++ "futures-util",
++ "h2",
++ "http",
++ "http-body",
++ "http-body-util",
++ "hyper",
++ "hyper-rustls",
++ "hyper-tls",
++ "hyper-util",
++ "js-sys",
++ "log",
++ "mime",
++ "native-tls",
++ "percent-encoding",
++ "pin-project-lite",
++ "rustls-pki-types",
++ "serde",
++ "serde_json",
++ "serde_urlencoded",
++ "sync_wrapper",
++ "tokio",
++ "tokio-native-tls",
++ "tower",
++ "tower-http",
++ "tower-service",
++ "url",
++ "wasm-bindgen",
++ "wasm-bindgen-futures",
++ "web-sys",
++]
++
+ [[package]]
+ name = "reqwest"
+ version = "0.13.4"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "219c5811de6525e5416c7d5d53bb656d3afdbc6c5af816e0802bcfa42dbdc1c3"
+ dependencies = [
+  "base64 0.22.1",
+  "bytes",
+  "futures-core",
+  "futures-util",
+@@ -2805,20 +3051,48 @@ dependencies = [
+  "tower",
+  "tower-http",
+  "tower-service",
+  "url",
+  "wasm-bindgen",
+  "wasm-bindgen-futures",
+  "wasm-streams",
+  "web-sys",
+ ]
+ 
++[[package]]
++name = "ring"
++version = "0.17.14"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "a4689e6c2294d81e88dc6261c768b63bc4fcdb852be6d1352498b114f61383b7"
++dependencies = [
++ "cc",
++ "cfg-if",
++ "getrandom 0.2.17",
++ "libc",
++ "untrusted",
++ "windows-sys 0.52.0",
++]
++
++[[package]]
++name = "rusqlite"
++version = "0.31.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b838eba278d213a8beaf485bd313fd580ca4505a00d5871caeb1457c55322cae"
++dependencies = [
++ "bitflags 2.13.1",
++ "fallible-iterator",
++ "fallible-streaming-iterator",
++ "hashlink",
++ "libsqlite3-sys",
++ "smallvec",
++]
++
+ [[package]]
+ name = "rustc-hash"
+ version = "2.1.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d"
+ 
+ [[package]]
+ name = "rustc_version"
+ version = "0.4.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -2833,35 +3107,83 @@ version = "1.1.4"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
+ dependencies = [
+  "bitflags 2.13.1",
+  "errno",
+  "libc",
+  "linux-raw-sys",
+  "windows-sys 0.61.2",
+ ]
+ 
++[[package]]
++name = "rustls"
++version = "0.23.43"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
++dependencies = [
++ "once_cell",
++ "rustls-pki-types",
++ "rustls-webpki",
++ "subtle",
++ "zeroize",
++]
++
++[[package]]
++name = "rustls-pki-types"
++version = "1.15.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "2f4925028c7eb5d1fcdaf196971378ed9d2c1c4efc7dc5d011256f76c99c0a96"
++dependencies = [
++ "zeroize",
++]
++
++[[package]]
++name = "rustls-webpki"
++version = "0.103.13"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
++dependencies = [
++ "ring",
++ "rustls-pki-types",
++ "untrusted",
++]
++
+ [[package]]
+ name = "rustversion"
+ version = "1.0.23"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
+ 
++[[package]]
++name = "ryu"
++version = "1.0.23"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
++
+ [[package]]
+ name = "same-file"
+ version = "1.0.6"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
+ dependencies = [
+  "winapi-util",
+ ]
+ 
++[[package]]
++name = "schannel"
++version = "0.1.29"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "91c1b7e4904c873ef0710c1f407dde2e6287de2bebc1bbbf7d430bb7cbffd939"
++dependencies = [
++ "windows-sys 0.61.2",
++]
++
+ [[package]]
+ name = "schemars"
+ version = "0.8.22"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "3fbf2ae1b8bc8e02df939598064d22402220cd5bbcca1c76f7d6a310974d5615"
+ dependencies = [
+  "dyn-clone",
+  "indexmap 1.9.3",
+  "schemars_derive",
+  "serde",
+@@ -2905,20 +3227,43 @@ dependencies = [
+  "serde_derive_internals",
+  "syn 2.0.119",
+ ]
+ 
+ [[package]]
+ name = "scopeguard"
+ version = "1.2.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+ 
++[[package]]
++name = "security-framework"
++version = "3.7.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b7f4bc775c73d9a02cde8bf7b2ec4c9d12743edf609006c7facc23998404cd1d"
++dependencies = [
++ "bitflags 2.13.1",
++ "core-foundation 0.10.1",
++ "core-foundation-sys",
++ "libc",
++ "security-framework-sys",
++]
++
++[[package]]
++name = "security-framework-sys"
++version = "2.17.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "6ce2691df843ecc5d231c0b14ece2acc3efb62c0a398c7e1d875f3983ce020e3"
++dependencies = [
++ "core-foundation-sys",
++ "libc",
++]
++
+ [[package]]
+ name = "selectors"
+ version = "0.36.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "c5d9c0c92a92d33f08817311cf3f2c29a3538a8240e94a6a3c622ce652d7e00c"
+ dependencies = [
+  "bitflags 2.13.1",
+  "cssparser",
+  "derive_more",
+  "log",
+@@ -3029,20 +3374,32 @@ dependencies = [
+ 
+ [[package]]
+ name = "serde_spanned"
+ version = "1.1.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "6662b5879511e06e8999a8a235d848113e942c9124f211511b16466ee2995f26"
+ dependencies = [
+  "serde_core",
+ ]
+ 
++[[package]]
++name = "serde_urlencoded"
++version = "0.7.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d3491c14715ca2294c4d6a88f15e84739788c1d030eed8c110436aafdaa2f3fd"
++dependencies = [
++ "form_urlencoded",
++ "itoa",
++ "ryu",
++ "serde",
++]
++
+ [[package]]
+ name = "serde_with"
+ version = "3.22.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "ee78f1fbe43ac4a0e47aadb3dbd357b69eb0d3793e948624cd03dd2750ab1c0a"
+ dependencies = [
+  "base64 0.22.1",
+  "bs58",
+  "chrono",
+  "hex",
+@@ -3238,20 +3595,26 @@ dependencies = [
+  "proc-macro2",
+  "quote",
+ ]
+ 
+ [[package]]
+ name = "strsim"
+ version = "0.11.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
+ 
++[[package]]
++name = "subtle"
++version = "2.6.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
++
+ [[package]]
+ name = "swift-rs"
+ version = "1.0.7"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "4057c98e2e852d51fdcfca832aac7b571f6b351ad159f9eda5db1655f8d0c4d7"
+ dependencies = [
+  "base64 0.21.7",
+  "serde",
+  "serde_json",
+ ]
+@@ -3301,20 +3664,41 @@ dependencies = [
+ name = "synstructure"
+ version = "0.13.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "728a70f3dbaf5bab7f0c4b1ac8d7ae5ea60a4b5549c8a5914361c99147a709d2"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+  "syn 2.0.119",
+ ]
+ 
++[[package]]
++name = "system-configuration"
++version = "0.7.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "a13f3d0daba03132c0aa9767f98351b3488edc2c100cda2d2ec2b04f3d8d3c8b"
++dependencies = [
++ "bitflags 2.13.1",
++ "core-foundation 0.9.4",
++ "system-configuration-sys",
++]
++
++[[package]]
++name = "system-configuration-sys"
++version = "0.6.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "8e1d1b10ced5ca923a1fcb8d03e96b8d3268065d724548c0211415ff6ac6bac4"
++dependencies = [
++ "core-foundation-sys",
++ "libc",
++]
++
+ [[package]]
+ name = "system-deps"
+ version = "6.2.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "a3e535eb8dded36d55ec13eddacd30dec501792ff23a0b1682c38601b8cf2349"
+ dependencies = [
+  "cfg-expr",
+  "heck 0.5.0",
+  "pkg-config",
+  "toml 0.8.2",
+@@ -3322,21 +3706,21 @@ dependencies = [
+ ]
+ 
+ [[package]]
+ name = "tao"
+ version = "0.35.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "d1c93047acf68669466a34690ac58cca7010bd1b201e1ec86f1fd0a75d3dd4a9"
+ dependencies = [
+  "bitflags 2.13.1",
+  "block2",
+- "core-foundation",
++ "core-foundation 0.10.1",
+  "core-graphics",
+  "crossbeam-channel",
+  "dbus",
+  "dispatch2",
+  "dlopen2",
+  "dpi",
+  "gdkwayland-sys",
+  "gdkx11-sys",
+  "gtk",
+  "jni",
+@@ -3401,21 +3785,21 @@ dependencies = [
+  "mime",
+  "muda",
+  "objc2",
+  "objc2-app-kit",
+  "objc2-foundation",
+  "objc2-ui-kit",
+  "objc2-web-kit",
+  "percent-encoding",
+  "plist",
+  "raw-window-handle",
+- "reqwest",
++ "reqwest 0.13.4",
+  "serde",
+  "serde_json",
+  "serde_repr",
+  "serialize-to-javascript",
+  "swift-rs",
+  "tauri-build",
+  "tauri-macros",
+  "tauri-runtime",
+  "tauri-runtime-wry",
+  "tauri-utils",
+@@ -3753,29 +4137,50 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
+ dependencies = [
+  "bytes",
+  "libc",
+  "mio",
+  "pin-project-lite",
+  "socket2",
+  "windows-sys 0.61.2",
+ ]
+ 
++[[package]]
++name = "tokio-native-tls"
++version = "0.3.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "bbae76ab933c85776efabc971569dd6119c580d8f5d448769dec1764bf796ef2"
++dependencies = [
++ "native-tls",
++ "tokio",
++]
++
++[[package]]
++name = "tokio-rustls"
++version = "0.26.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "1729aa945f29d91ba541258c8df89027d5792d85a8841fb65e8bf0f4ede4ef61"
++dependencies = [
++ "rustls",
++ "tokio",
++]
++
+ [[package]]
+ name = "tokio-util"
+ version = "0.7.19"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "494815d09bf52b5548659851081238f0ca39ff638363907596da739561c62c52"
+ dependencies = [
+  "bytes",
+  "futures-core",
+  "futures-sink",
++ "libc",
+  "pin-project-lite",
+  "tokio",
+ ]
+ 
+ [[package]]
+ name = "toml"
+ version = "0.8.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "185d8ab0dfbb35cf1399a6344d8484209c088f75f8f68230da55d48d95d43e3d"
+ dependencies = [
+@@ -4066,33 +4471,45 @@ name = "unicode-ident"
+ version = "1.0.24"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+ 
+ [[package]]
+ name = "unicode-segmentation"
+ version = "1.13.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
+ 
++[[package]]
++name = "untrusted"
++version = "0.9.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
++
+ [[package]]
+ name = "url"
+ version = "2.5.8"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+ dependencies = [
+  "form_urlencoded",
+  "idna",
+  "percent-encoding",
+  "serde",
+  "serde_derive",
+ ]
+ 
++[[package]]
++name = "urlencoding"
++version = "2.1.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
++
+ [[package]]
+ name = "urlpattern"
+ version = "0.3.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "70acd30e3aa1450bc2eece896ce2ad0d178e9c079493819301573dae3c37ba6d"
+ dependencies = [
+  "regex",
+  "serde",
+  "unic-ucd-ident",
+  "url",
+@@ -4109,20 +4526,26 @@ name = "uuid"
+ version = "1.24.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "bf3923a6f5c4c6382e0b653c4117f48d631ea17f38ed86e2a828e6f7412f5239"
+ dependencies = [
+  "getrandom 0.4.3",
+  "js-sys",
+  "serde_core",
+  "wasm-bindgen",
+ ]
+ 
++[[package]]
++name = "vcpkg"
++version = "0.2.15"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
++
+ [[package]]
+ name = "version-compare"
+ version = "0.2.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "03c2856837ef78f57382f06b2b8563a2f512f7185d732608fd9176cb3b8edf0e"
+ 
+ [[package]]
+ name = "version_check"
+ version = "0.9.5"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -4494,20 +4917,31 @@ checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
+ [[package]]
+ name = "windows-numerics"
+ version = "0.2.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "9150af68066c4c5c07ddc0ce30421554771e528bde427614c61038bc2c92c2b1"
+ dependencies = [
+  "windows-core 0.61.2",
+  "windows-link 0.1.3",
+ ]
+ 
++[[package]]
++name = "windows-registry"
++version = "0.6.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "02752bf7fbdcce7f2a27a742f798510f3e5ad88dbe84871e5168e2120c3d5720"
++dependencies = [
++ "windows-link 0.2.1",
++ "windows-result 0.4.1",
++ "windows-strings 0.5.1",
++]
++
+ [[package]]
+ name = "windows-result"
+ version = "0.3.4"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "56f42bd332cc6c8eac5af113fc0c1fd6a8fd2aa08a0119358686e5160d0586c6"
+ dependencies = [
+  "windows-link 0.1.3",
+ ]
+ 
+ [[package]]
+@@ -4539,20 +4973,29 @@ dependencies = [
+ 
+ [[package]]
+ name = "windows-sys"
+ version = "0.45.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "75283be5efb2831d37ea142365f009c02ec203cd29a3ebecbc093d52315b66d0"
+ dependencies = [
+  "windows-targets 0.42.2",
+ ]
+ 
++[[package]]
++name = "windows-sys"
++version = "0.52.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
++dependencies = [
++ "windows-targets 0.52.6",
++]
++
+ [[package]]
+ name = "windows-sys"
+ version = "0.59.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
+ dependencies = [
+  "windows-targets 0.52.6",
+ ]
+ 
+ [[package]]
+@@ -4900,20 +5343,40 @@ dependencies = [
+ 
+ [[package]]
+ name = "zcheapstr"
+ version = "1.0.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "769381976ea05c1f0abde0ca527b02e415bccbdbad148534a2b0c1901c9ab934"
+ dependencies = [
+  "serde",
+ ]
+ 
++[[package]]
++name = "zerocopy"
++version = "0.8.56"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "556764e583adb45a9f8d413c2a147fa7e8d821e48e12b14fd560b607998b75eb"
++dependencies = [
++ "zerocopy-derive",
++]
++
++[[package]]
++name = "zerocopy-derive"
++version = "0.8.56"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "f2ab42fc20575779bd240faa45f94a74256f755c0fa9e89f0ede20d91d0cdfc1"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn 2.0.119",
++]
++
+ [[package]]
+ name = "zerofrom"
+ version = "0.1.8"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "0ec05a11813ea801ff6d75110ad09cd0824ddba17dfe17128ea0d5f68e6c5272"
+ dependencies = [
+  "zerofrom-derive",
+ ]
+ 
+ [[package]]
+@@ -4921,20 +5384,26 @@ name = "zerofrom-derive"
+ version = "0.1.7"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "11532158c46691caf0f2593ea8358fed6bbf68a0315e80aae9bd41fbade684a1"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+  "syn 2.0.119",
+  "synstructure",
+ ]
+ 
++[[package]]
++name = "zeroize"
++version = "1.9.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
++
+ [[package]]
+ name = "zerotrie"
+ version = "0.2.4"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "0f9152d31db0792fa83f70fb2f83148effb5c1f5b8c7686c3459e361d9bc20bf"
+ dependencies = [
+  "displaydoc",
+  "yoke",
+  "zerofrom",
+ ]
+diff --git a/src-tauri/Cargo.toml b/src-tauri/Cargo.toml
+index f1e3a66..355fa2d 100644
+--- a/src-tauri/Cargo.toml
++++ b/src-tauri/Cargo.toml
+@@ -1,25 +1,22 @@
+ [package]
+ name = "chem3d"
+ version = "0.1.0"
+ description = "A Tauri App"
+ authors = ["you"]
+ edition = "2021"
+ 
+-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+-
+ [lib]
+-# The `_lib` suffix may seem redundant but it is necessary
+-# to make the lib name unique and wouldn't conflict with the bin name.
+-# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+ name = "chem3d_lib"
+ crate-type = ["staticlib", "cdylib", "rlib"]
+ 
+ [build-dependencies]
+ tauri-build = { version = "2", features = [] }
+ 
+ [dependencies]
+ tauri = { version = "2", features = [] }
+ tauri-plugin-opener = "2"
+-serde = { version = "1", features = ["derive"] }
+-serde_json = "1"
+-
++serde = { version = "1.0", features = ["derive"] }
++serde_json = "1.0"
++rusqlite = { version = "0.31.0", features = ["bundled"] }
++reqwest = { version = "0.12", features = ["json", "blocking"] }
++urlencoding = "2.1"
+diff --git a/src-tauri/src/db.rs b/src-tauri/src/db.rs
+new file mode 100644
+index 0000000..e937a1e
+--- /dev/null
++++ b/src-tauri/src/db.rs
+@@ -0,0 +1,163 @@
++use rusqlite::{Connection, Result};
++use std::fs;
++use std::path::PathBuf;
++use tauri::Manager;
++
++pub fn get_db_path(app_handle: &tauri::AppHandle) -> PathBuf {
++    let mut path = app_handle
++        .path()
++        .app_data_dir()
++        .unwrap_or_else(|_| PathBuf::from("."));
++    fs::create_dir_all(&path).ok();
++    path.push("chem3d.db");
++    path
++}
++
++pub fn init_db(app_handle: &tauri::AppHandle) -> Result<(), String> {
++    let path = get_db_path(app_handle);
++    let conn = Connection::open(&path).map_err(|e| e.to_string())?;
++
++    conn.execute_batch("PRAGMA foreign_keys = ON;").map_err(|e| e.to_string())?;
++
++    conn.execute(
++        "CREATE TABLE IF NOT EXISTS compounds (
++            id INTEGER PRIMARY KEY AUTOINCREMENT,
++            canonical_name TEXT UNIQUE NOT NULL,
++            common_name TEXT,
++            formula TEXT,
++            smiles TEXT UNIQUE NOT NULL,
++            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
++        )",
++        [],
++    )
++    .map_err(|e| e.to_string())?;
++
++    conn.execute(
++        "CREATE TABLE IF NOT EXISTS properties (
++            id INTEGER PRIMARY KEY AUTOINCREMENT,
++            compound_id INTEGER UNIQUE REFERENCES compounds(id) ON DELETE CASCADE,
++            mw REAL,
++            logp REAL,
++            boiling_point REAL,
++            melting_point REAL,
++            functional_groups TEXT,
++            atoms_json TEXT,
++            bonds_json TEXT
++        )",
++        [],
++    )
++    .map_err(|e| e.to_string())?;
++
++    conn.execute(
++        "CREATE TABLE IF NOT EXISTS user_notes (
++            id INTEGER PRIMARY KEY AUTOINCREMENT,
++            compound_id INTEGER UNIQUE REFERENCES compounds(id) ON DELETE CASCADE,
++            content TEXT,
++            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
++        )",
++        [],
++    )
++    .map_err(|e| e.to_string())?;
++
++    conn.execute(
++        "CREATE TABLE IF NOT EXISTS search_history (
++            id INTEGER PRIMARY KEY AUTOINCREMENT,
++            query TEXT NOT NULL,
++            searched_at DATETIME DEFAULT CURRENT_TIMESTAMP
++        )",
++        [],
++    )
++    .map_err(|e| e.to_string())?;
++
++    conn.execute(
++        "CREATE TABLE IF NOT EXISTS app_settings (
++            key TEXT PRIMARY KEY,
++            value TEXT
++        )",
++        [],
++    )
++    .map_err(|e| e.to_string())?;
++
++    Ok(())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn test_db_tables_creation() {
++        let conn = Connection::open_in_memory().unwrap();
++        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
++        conn.execute(
++            "CREATE TABLE IF NOT EXISTS compounds (
++                id INTEGER PRIMARY KEY AUTOINCREMENT,
++                canonical_name TEXT UNIQUE NOT NULL,
++                common_name TEXT,
++                formula TEXT,
++                smiles TEXT UNIQUE NOT NULL,
++                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
++            )",
++            [],
++        )
++        .unwrap();
++
++        conn.execute(
++            "CREATE TABLE IF NOT EXISTS properties (
++                id INTEGER PRIMARY KEY AUTOINCREMENT,
++                compound_id INTEGER UNIQUE REFERENCES compounds(id) ON DELETE CASCADE,
++                mw REAL,
++                logp REAL,
++                boiling_point REAL,
++                melting_point REAL,
++                functional_groups TEXT,
++                atoms_json TEXT,
++                bonds_json TEXT
++            )",
++            [],
++        )
++        .unwrap();
++
++        conn.execute(
++            "CREATE TABLE IF NOT EXISTS user_notes (
++                id INTEGER PRIMARY KEY AUTOINCREMENT,
++                compound_id INTEGER UNIQUE REFERENCES compounds(id) ON DELETE CASCADE,
++                content TEXT,
++                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
++            )",
++            [],
++        )
++        .unwrap();
++
++        conn.execute(
++            "CREATE TABLE IF NOT EXISTS search_history (
++                id INTEGER PRIMARY KEY AUTOINCREMENT,
++                query TEXT NOT NULL,
++                searched_at DATETIME DEFAULT CURRENT_TIMESTAMP
++            )",
++            [],
++        )
++        .unwrap();
++
++        conn.execute(
++            "CREATE TABLE IF NOT EXISTS app_settings (
++                key TEXT PRIMARY KEY,
++                value TEXT
++            )",
++            [],
++        )
++        .unwrap();
++
++        let mut stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type='table'").unwrap();
++        let tables: Vec<String> = stmt
++            .query_map([], |row| row.get(0))
++            .unwrap()
++            .filter_map(|r| r.ok())
++            .collect();
++        assert!(tables.contains(&"compounds".to_string()));
++        assert!(tables.contains(&"properties".to_string()));
++        assert!(tables.contains(&"user_notes".to_string()));
++        assert!(tables.contains(&"search_history".to_string()));
++        assert!(tables.contains(&"app_settings".to_string()));
++    }
++}
+diff --git a/src-tauri/src/lib.rs b/src-tauri/src/lib.rs
+index 4a277ef..fec72f9 100644
+--- a/src-tauri/src/lib.rs
++++ b/src-tauri/src/lib.rs
+@@ -1,14 +1,298 @@
+-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
++pub mod db;
++pub mod pubchem;
++
++use db::{get_db_path, init_db};
++use pubchem::{fetch_from_pubchem, CompoundData};
++use rusqlite::{params, Connection};
++
++#[tauri::command]
++fn search_compound(app_handle: tauri::AppHandle, query: String) -> Result<CompoundData, String> {
++    let db_path = get_db_path(&app_handle);
++    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
++
++    // 1. Save history query
++    conn.execute(
++        "INSERT INTO search_history (query) VALUES (?)",
++        params![query],
++    )
++    .ok();
++
++    // 2. Query in local compounds DB first
++    let mut stmt = conn
++        .prepare(
++            "SELECT c.id, c.canonical_name, c.common_name, c.formula, c.smiles, 
++                    p.mw, p.logp, p.boiling_point, p.melting_point, p.functional_groups,
++                    p.atoms_json, p.bonds_json
++             FROM compounds c
++             LEFT JOIN properties p ON c.id = p.compound_id
++             WHERE c.canonical_name LIKE ?1 OR c.common_name LIKE ?1 OR c.formula = ?2",
++        )
++        .map_err(|e| e.to_string())?;
++
++    let local_res = stmt.query_row(params![format!("%{}%", query), query], |row| {
++        let f_groups_json: String = row.get(9).unwrap_or_else(|_| "[]".to_string());
++        let f_groups: Vec<String> = serde_json::from_str(&f_groups_json).unwrap_or_default();
++        let atoms_json: String = row.get(10).unwrap_or_else(|_| "[]".to_string());
++        let atoms: Vec<pubchem::AtomData> = serde_json::from_str(&atoms_json).unwrap_or_default();
++        let bonds_json: String = row.get(11).unwrap_or_else(|_| "[]".to_string());
++        let bonds: Vec<pubchem::BondData> = serde_json::from_str(&bonds_json).unwrap_or_default();
++        Ok(CompoundData {
++            id: row.get(0)?,
++            canonical_name: row.get(1)?,
++            common_name: row.get(2)?,
++            formula: row.get(3)?,
++            smiles: row.get(4)?,
++            mw: row.get(5)?,
++            logp: row.get(6).ok(),
++            boiling_point: row.get(7).ok(),
++            melting_point: row.get(8).ok(),
++            functional_groups: f_groups,
++            atoms,
++            bonds,
++        })
++    });
++
++    if let Ok(compound) = local_res {
++        return Ok(compound);
++    }
++
++    // 3. Crawler PubChem
++    let mut pubchem_comp = fetch_from_pubchem(&query)?;
++
++    // 4. Save to Database
++    conn.execute(
++        "INSERT OR IGNORE INTO compounds (canonical_name, common_name, formula, smiles) VALUES (?, ?, ?, ?)",
++        params![
++            pubchem_comp.canonical_name,
++            pubchem_comp.common_name,
++            pubchem_comp.formula,
++            pubchem_comp.smiles
++        ],
++    )
++    .map_err(|e| e.to_string())?;
++
++    let comp_id: i32 = conn
++        .query_row(
++            "SELECT id FROM compounds WHERE canonical_name = ?1 OR smiles = ?2",
++            params![pubchem_comp.canonical_name, pubchem_comp.smiles],
++            |row| row.get(0),
++        )
++        .unwrap_or(0);
++    pubchem_comp.id = comp_id;
++
++    let f_groups_json = serde_json::to_string(&pubchem_comp.functional_groups)
++        .unwrap_or_else(|_| "[]".to_string());
++    let atoms_json = serde_json::to_string(&pubchem_comp.atoms)
++        .unwrap_or_else(|_| "[]".to_string());
++    let bonds_json = serde_json::to_string(&pubchem_comp.bonds)
++        .unwrap_or_else(|_| "[]".to_string());
++
++    conn.execute(
++        "INSERT OR REPLACE INTO properties (compound_id, mw, logp, boiling_point, melting_point, functional_groups, atoms_json, bonds_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
++        params![
++            comp_id,
++            pubchem_comp.mw,
++            pubchem_comp.logp,
++            pubchem_comp.boiling_point,
++            pubchem_comp.melting_point,
++            f_groups_json,
++            atoms_json,
++            bonds_json
++        ],
++    )
++    .map_err(|e| e.to_string())?;
++
++    Ok(pubchem_comp)
++}
++
++#[tauri::command]
++fn get_search_history(app_handle: tauri::AppHandle) -> Result<Vec<String>, String> {
++    let db_path = get_db_path(&app_handle);
++    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
++    let mut stmt = conn
++        .prepare("SELECT query FROM search_history GROUP BY query ORDER BY MAX(id) DESC LIMIT 10")
++        .map_err(|e| e.to_string())?;
++    let rows = stmt
++        .query_map([], |row| row.get(0))
++        .map_err(|e| e.to_string())?;
++    let mut history = Vec::new();
++    for r in rows {
++        if let Ok(query) = r {
++            history.push(query);
++        }
++    }
++    Ok(history)
++}
++
+ #[tauri::command]
+-fn greet(name: &str) -> String {
+-    format!("Hello, {}! You've been greeted from Rust!", name)
++fn save_note(app_handle: tauri::AppHandle, compound_id: i32, note: String) -> Result<(), String> {
++    let db_path = get_db_path(&app_handle);
++    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
++    conn.execute(
++        "INSERT OR REPLACE INTO user_notes (compound_id, content, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
++        params![compound_id, note],
++    )
++    .map_err(|e| e.to_string())?;
++    Ok(())
++}
++
++#[tauri::command]
++fn get_note(app_handle: tauri::AppHandle, compound_id: i32) -> Result<String, String> {
++    let db_path = get_db_path(&app_handle);
++    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
++    let mut stmt = conn
++        .prepare("SELECT content FROM user_notes WHERE compound_id = ?")
++        .map_err(|e| e.to_string())?;
++    let note: Result<String, rusqlite::Error> =
++        stmt.query_row(params![compound_id], |row| row.get(0));
++    match note {
++        Ok(content) => Ok(content),
++        Err(_) => Ok("".to_string()),
++    }
+ }
+ 
+ #[cfg_attr(mobile, tauri::mobile_entry_point)]
+ pub fn run() {
+     tauri::Builder::default()
+         .plugin(tauri_plugin_opener::init())
+-        .invoke_handler(tauri::generate_handler![greet])
++        .setup(|app| {
++            init_db(app.handle()).expect("Failed to initialize database");
++            Ok(())
++        })
++        .invoke_handler(tauri::generate_handler![
++            search_compound,
++            get_search_history,
++            save_note,
++            get_note
++        ])
+         .run(tauri::generate_context!())
+         .expect("error while running tauri application");
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn test_search_history_ordering_query() {
++        let conn = Connection::open_in_memory().unwrap();
++        conn.execute(
++            "CREATE TABLE search_history (
++                id INTEGER PRIMARY KEY AUTOINCREMENT,
++                query TEXT NOT NULL,
++                searched_at DATETIME DEFAULT CURRENT_TIMESTAMP
++            )",
++            [],
++        )
++        .unwrap();
++
++        conn.execute("INSERT INTO search_history (query) VALUES ('H2O')", []).unwrap();
++        conn.execute("INSERT INTO search_history (query) VALUES ('CO2')", []).unwrap();
++        conn.execute("INSERT INTO search_history (query) VALUES ('H2O')", []).unwrap();
++
++        let mut stmt = conn
++            .prepare("SELECT query FROM search_history GROUP BY query ORDER BY MAX(id) DESC LIMIT 10")
++            .unwrap();
++        let history: Vec<String> = stmt
++            .query_map([], |row| row.get(0))
++            .unwrap()
++            .filter_map(|r| r.ok())
++            .collect();
++
++        assert_eq!(history, vec!["H2O", "CO2"]);
++    }
++
++    #[test]
++    fn test_local_query_exact_formula_and_atoms_cache() {
++        let conn = Connection::open_in_memory().unwrap();
++        conn.execute(
++            "CREATE TABLE compounds (
++                id INTEGER PRIMARY KEY AUTOINCREMENT,
++                canonical_name TEXT UNIQUE NOT NULL,
++                common_name TEXT,
++                formula TEXT,
++                smiles TEXT UNIQUE NOT NULL,
++                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
++            )",
++            [],
++        )
++        .unwrap();
++        conn.execute(
++            "CREATE TABLE properties (
++                id INTEGER PRIMARY KEY AUTOINCREMENT,
++                compound_id INTEGER UNIQUE REFERENCES compounds(id) ON DELETE CASCADE,
++                mw REAL,
++                logp REAL,
++                boiling_point REAL,
++                melting_point REAL,
++                functional_groups TEXT,
++                atoms_json TEXT,
++                bonds_json TEXT
++            )",
++            [],
++        )
++        .unwrap();
++
++        conn.execute(
++            "INSERT INTO compounds (canonical_name, common_name, formula, smiles) VALUES ('Water', 'water', 'H2O', 'O')",
++            [],
++        )
++        .unwrap();
++        let atoms = vec![pubchem::AtomData { element: "O".to_string(), x: 0.0, y: 0.0, z: 0.0 }];
++        let bonds = vec![pubchem::BondData { source: 0, target: 1, r#type: 1 }];
++        let atoms_json = serde_json::to_string(&atoms).unwrap();
++        let bonds_json = serde_json::to_string(&bonds).unwrap();
++        conn.execute(
++            "INSERT INTO properties (compound_id, mw, atoms_json, bonds_json) VALUES (1, 18.015, ?1, ?2)",
++            params![atoms_json, bonds_json],
++        )
++        .unwrap();
++
++        let mut stmt = conn
++            .prepare(
++                "SELECT c.id, c.canonical_name, c.common_name, c.formula, c.smiles, 
++                        p.mw, p.logp, p.boiling_point, p.melting_point, p.functional_groups,
++                        p.atoms_json, p.bonds_json
++                 FROM compounds c
++                 LEFT JOIN properties p ON c.id = p.compound_id
++                 WHERE c.canonical_name LIKE ?1 OR c.common_name LIKE ?1 OR c.formula = ?2",
++            )
++            .unwrap();
++
++        // Query by exact formula 'H2O'
++        let query = "H2O";
++        let res: CompoundData = stmt.query_row(params![format!("%{}%", query), query], |row| {
++            let f_groups_json: String = row.get(9).unwrap_or_else(|_| "[]".to_string());
++            let f_groups: Vec<String> = serde_json::from_str(&f_groups_json).unwrap_or_default();
++            let atoms_str: String = row.get(10).unwrap_or_else(|_| "[]".to_string());
++            let atoms_parsed: Vec<pubchem::AtomData> = serde_json::from_str(&atoms_str).unwrap_or_default();
++            let bonds_str: String = row.get(11).unwrap_or_else(|_| "[]".to_string());
++            let bonds_parsed: Vec<pubchem::BondData> = serde_json::from_str(&bonds_str).unwrap_or_default();
++            Ok(CompoundData {
++                id: row.get(0)?,
++                canonical_name: row.get(1)?,
++                common_name: row.get(2)?,
++                formula: row.get(3)?,
++                smiles: row.get(4)?,
++                mw: row.get(5)?,
++                logp: row.get(6).ok(),
++                boiling_point: row.get(7).ok(),
++                melting_point: row.get(8).ok(),
++                functional_groups: f_groups,
++                atoms: atoms_parsed,
++                bonds: bonds_parsed,
++            })
++        }).unwrap();
++
++        assert_eq!(res.canonical_name, "Water");
++        assert_eq!(res.atoms.len(), 1);
++        assert_eq!(res.atoms[0].element, "O");
++        assert_eq!(res.bonds.len(), 1);
++
++        // Query by partial formula 'H2' should fail to match formula 'H2O'
++        let query_partial = "H2";
++        let res_partial = stmt.query_row(params![format!("%{}%", query_partial), query_partial], |_| Ok(()));
++        assert!(res_partial.is_err());
++    }
++}
++
+diff --git a/src-tauri/src/pubchem.rs b/src-tauri/src/pubchem.rs
+new file mode 100644
+index 0000000..6a0b0be
+--- /dev/null
++++ b/src-tauri/src/pubchem.rs
+@@ -0,0 +1,204 @@
++use serde::{Deserialize, Serialize};
++
++#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
++pub struct AtomData {
++    pub element: String,
++    pub x: f64,
++    pub y: f64,
++    pub z: f64,
++}
++
++#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
++pub struct BondData {
++    pub source: usize,
++    pub target: usize,
++    pub r#type: i32,
++}
++
++#[derive(Serialize, Deserialize, Clone, Debug)]
++pub struct CompoundData {
++    pub id: i32,
++    pub canonical_name: String,
++    pub common_name: String,
++    pub formula: String,
++    pub smiles: String,
++    pub mw: f64,
++    pub logp: Option<f64>,
++    pub boiling_point: Option<f64>,
++    pub melting_point: Option<f64>,
++    pub functional_groups: Vec<String>,
++    pub atoms: Vec<AtomData>,
++    pub bonds: Vec<BondData>,
++}
++
++#[derive(Deserialize)]
++struct PubChemPropRow {
++    #[serde(rename = "CID")]
++    cid: i64,
++    #[serde(rename = "CanonicalSMILES")]
++    smiles: Option<String>,
++    #[serde(rename = "MolecularFormula")]
++    formula: Option<String>,
++    #[serde(rename = "MolecularWeight")]
++    mw: Option<serde_json::Value>,
++    #[serde(rename = "IUPACName")]
++    iupac: Option<String>,
++}
++
++#[derive(Deserialize)]
++struct PubChemPropResponse {
++    #[serde(rename = "PropertyTable")]
++    property_table: PubChemPropTable,
++}
++
++#[derive(Deserialize)]
++struct PubChemPropTable {
++    #[serde(rename = "Properties")]
++    properties: Vec<PubChemPropRow>,
++}
++
++pub fn fetch_from_pubchem(query: &str) -> Result<CompoundData, String> {
++    let client = reqwest::blocking::Client::builder()
++        .timeout(std::time::Duration::from_secs(10))
++        .user_agent("Chem3D/1.0")
++        .build()
++        .map_err(|e| e.to_string())?;
++
++    let prop_url = format!(
++        "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/{}/property/CanonicalSMILES,MolecularFormula,MolecularWeight,IUPACName/JSON",
++        urlencoding::encode(query)
++    );
++
++    let res = client.get(&prop_url).send().map_err(|e| e.to_string())?;
++    if !res.status().is_success() {
++        return Err(format!("PubChem compound search failed with code {}", res.status()));
++    }
++
++    let prop_data: PubChemPropResponse = res.json().map_err(|e| e.to_string())?;
++    let prop = prop_data
++        .property_table
++        .properties
++        .first()
++        .ok_or_else(|| "No properties found for compound".to_string())?;
++
++    let cid = prop.cid;
++    let smiles = prop.smiles.clone().unwrap_or_default();
++    let formula = prop.formula.clone().unwrap_or_default();
++    let name = prop.iupac.clone().unwrap_or_else(|| query.to_string());
++
++    let mw = match &prop.mw {
++        Some(serde_json::Value::Number(n)) => n.as_f64().unwrap_or(0.0),
++        Some(serde_json::Value::String(s)) => s.parse::<f64>().unwrap_or(0.0),
++        _ => 0.0,
++    };
++
++    // Fetch 3D coordinates in SDF format
++    let sdf_url = format!(
++        "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{}/SDF?record_type=3d",
++        cid
++    );
++    let sdf_res = client.get(&sdf_url).send().map_err(|e| e.to_string())?;
++    let sdf_text = if sdf_res.status().is_success() {
++        sdf_res.text().unwrap_or_default()
++    } else {
++        "".to_string()
++    };
++
++    let (atoms, bonds) = parse_sdf(&sdf_text);
++
++    Ok(CompoundData {
++        id: 0,
++        canonical_name: name,
++        common_name: query.to_string(),
++        formula,
++        smiles,
++        mw,
++        logp: None,
++        boiling_point: None,
++        melting_point: None,
++        functional_groups: vec![],
++        atoms,
++        bonds,
++    })
++}
++
++pub fn parse_sdf(sdf: &str) -> (Vec<AtomData>, Vec<BondData>) {
++    let mut atoms = Vec::new();
++    let mut bonds = Vec::new();
++    let lines: Vec<&str> = sdf.lines().collect();
++    if lines.len() < 4 {
++        return (atoms, bonds);
++    }
++
++    // Line 4 contains the count of atoms and bonds
++    let count_line = lines[3];
++    if count_line.len() < 6 {
++        return (atoms, bonds);
++    }
++    let atom_count = count_line[0..3].trim().parse::<usize>().unwrap_or(0);
++    let bond_count = count_line[3..6].trim().parse::<usize>().unwrap_or(0);
++
++    let mut line_idx = 4;
++    for _ in 0..atom_count {
++        if line_idx >= lines.len() {
++            break;
++        }
++        let line = lines[line_idx];
++        if line.len() >= 34 {
++            let x = line[0..10].trim().parse::<f64>().unwrap_or(0.0);
++            let y = line[10..20].trim().parse::<f64>().unwrap_or(0.0);
++            let z = line[20..30].trim().parse::<f64>().unwrap_or(0.0);
++            let element = line[31..34].trim().to_string();
++            atoms.push(AtomData { element, x, y, z });
++        }
++        line_idx += 1;
++    }
++
++    for _ in 0..bond_count {
++        if line_idx >= lines.len() {
++            break;
++        }
++        let line = lines[line_idx];
++        if line.len() >= 9 {
++            let source = line[0..3].trim().parse::<usize>().unwrap_or(1).saturating_sub(1);
++            let target = line[3..6].trim().parse::<usize>().unwrap_or(1).saturating_sub(1);
++            let r#type = line[6..9].trim().parse::<i32>().unwrap_or(1);
++            bonds.push(BondData { source, target, r#type });
++        }
++        line_idx += 1;
++    }
++
++    (atoms, bonds)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn test_parse_sdf_sample() {
++        let sample_sdf = "\
++2244
++  -OEChem-08102615383D
++
++ 3 2  0  0  0  0  0  0  0  0999 V2000
++    0.0000    0.0000    0.0000 O   0  0  0  0  0  0  0  0  0  0  0  0
++    0.9600    0.0000    0.0000 H   0  0  0  0  0  0  0  0  0  0  0  0
++   -0.2400    0.9200    0.0000 H   0  0  0  0  0  0  0  0  0  0  0  0
++  1  2  1  0  0  0  0
++  1  3  1  0  0  0  0
++M  END
++$$$$";
++        let (atoms, bonds) = parse_sdf(sample_sdf);
++        assert_eq!(atoms.len(), 3);
++        assert_eq!(atoms[0].element, "O");
++        assert_eq!(atoms[1].element, "H");
++        assert_eq!(atoms[2].element, "H");
++        assert_eq!(atoms[1].x, 0.96);
++
++        assert_eq!(bonds.len(), 2);
++        assert_eq!(bonds[0].source, 0);
++        assert_eq!(bonds[0].target, 1);
++        assert_eq!(bonds[0].r#type, 1);
++    }
++}

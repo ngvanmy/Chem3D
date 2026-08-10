@@ -32,3 +32,22 @@ DONE
 - **Colors & Radii:** Atom render spheres mapped to standard CPK coloring (C: gray, H: white, O: red, N: blue, S: yellow, P: orange hex `#ff8000`).
 - **3D Canvas & Orbit Controls:** Clean R3F canvas config with position `[0, 0, 10]`, proper lighting, and `OrbitControls` damping enabled.
 - **Tailwind Config:** `content` paths accurately target `./index.html` and `./src/**/*.{js,ts,jsx,tsx}`.
+
+---
+
+## Task 1 Review Fixes
+
+### Findings Fixed:
+1. **UTF-8 Encoding issue**: Re-saved `src/components/MoleculeViewer.tsx` with clean UTF-8 Vietnamese tooltip text (`Dùng chuột để Xoay / Cuộn để Zoom`).
+2. **Placeholder names**:
+   - Updated `src-tauri/tauri.conf.json`: productName set to `Chem3D`, identifier set to `com.chem3d.app`, window title set to `Chem3D`.
+   - Updated `package.json`: package name set to `chem3d`.
+   - Updated `src-tauri/Cargo.toml`: package name set to `chem3d`, lib name set to `chem3d_lib`.
+   - Updated `src-tauri/src/main.rs`: updated entry point invocation to `chem3d_lib::run()`.
+
+### Verification Steps & Outputs:
+1. **Frontend Build (`npm run build`):**
+   - Result: Exit code 0. 590 modules transformed cleanly into `dist/`.
+2. **Backend Check (`cargo check`):**
+   - Result: Exit code 0. `chem3d_lib` compiled without errors.
+

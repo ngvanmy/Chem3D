@@ -1,0 +1,398 @@
+# Review package: 88c8fd7..50143be
+
+## Commits
+50143be fix(ai): add request timeout and dynamic model support for Gemini client
+4ee22da feat: integrate Cloud AI and Ollama/LM Studio client proxies
+
+
+## Files changed
+ src-tauri/src/ai.rs  | 235 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ src-tauri/src/lib.rs |  92 +++++++++++++++++++-
+ 2 files changed, 326 insertions(+), 1 deletion(-)
+
+
+## Diff
+diff --git a/src-tauri/src/ai.rs b/src-tauri/src/ai.rs
+new file mode 100644
+index 0000000..6162cfe
+--- /dev/null
++++ b/src-tauri/src/ai.rs
+@@ -0,0 +1,235 @@
++use serde::{Deserialize, Serialize};
++use serde_json::json;
++
++#[derive(Deserialize, Serialize, Debug)]
++pub struct LocalModelsResponse {
++    pub data: Vec<LocalModelItem>,
++}
++
++#[derive(Deserialize, Serialize, Debug)]
++pub struct LocalModelItem {
++    pub id: String,
++}
++
++#[derive(Deserialize, Serialize, Debug)]
++pub struct GeminiResponse {
++    pub candidates: Vec<GeminiCandidate>,
++}
++
++#[derive(Deserialize, Serialize, Debug)]
++pub struct GeminiCandidate {
++    pub content: GeminiContent,
++}
++
++#[derive(Deserialize, Serialize, Debug)]
++pub struct GeminiContent {
++    pub parts: Vec<GeminiPart>,
++}
++
++#[derive(Deserialize, Serialize, Debug)]
++pub struct GeminiPart {
++    pub text: String,
++}
++
++#[derive(Deserialize, Serialize, Debug)]
++pub struct OpenAIResponse {
++    pub choices: Vec<OpenAIChoice>,
++}
++
++#[derive(Deserialize, Serialize, Debug)]
++pub struct OpenAIChoice {
++    pub message: OpenAIMessageResponse,
++}
++
++#[derive(Deserialize, Serialize, Debug)]
++pub struct OpenAIMessageResponse {
++    pub content: String,
++}
++
++pub fn test_connection(endpoint: &str) -> Result<Vec<String>, String> {
++    let client = reqwest::blocking::Client::builder()
++        .timeout(std::time::Duration::from_secs(30))
++        .build()
++        .map_err(|e| e.to_string())?;
++    let url = format!("{}/models", endpoint.trim_end_matches('/'));
++
++    let res = client.get(&url).send().map_err(|e| e.to_string())?;
++    if !res.status().is_success() {
++        return Err(format!("Server returned error status {}", res.status()));
++    }
++
++    let model_data: LocalModelsResponse = res.json().map_err(|e| e.to_string())?;
++    let model_names = model_data.data.into_iter().map(|m| m.id).collect();
++    Ok(model_names)
++}
++
++pub fn call_gemini(
++    api_key: &str,
++    model: &str,
++    prompt: &str,
++    context: &str,
++) -> Result<String, String> {
++    let client = reqwest::blocking::Client::builder()
++        .timeout(std::time::Duration::from_secs(30))
++        .build()
++        .map_err(|e| e.to_string())?;
++
++    let effective_model = if model.trim().is_empty() {
++        "gemini-2.5-flash"
++    } else {
++        model.trim()
++    };
++
++    let url = format!(
++        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
++        effective_model, api_key
++    );
++
++    let full_prompt = format!("Context: {}\n\nQuestion: {}", context, prompt);
++
++    let body = json!({
++        "contents": [{
++            "parts": [{
++                "text": full_prompt
++            }]
++        }]
++    });
++
++    let res = client
++        .post(&url)
++        .json(&body)
++        .send()
++        .map_err(|e| e.to_string())?;
++
++    if !res.status().is_success() {
++        return Err(format!("Gemini API error: {}", res.status()));
++    }
++
++    let resp: GeminiResponse = res.json().map_err(|e| e.to_string())?;
++    let text = resp
++        .candidates
++        .first()
++        .and_then(|c| c.content.parts.first())
++        .map(|p| p.text.clone())
++        .ok_or_else(|| "Empty response from Gemini".to_string())?;
++
++    Ok(text)
++}
++
++pub fn call_openai_compatible(
++    endpoint: &str,
++    api_key: Option<&str>,
++    model: &str,
++    prompt: &str,
++    context: &str,
++) -> Result<String, String> {
++    let client = reqwest::blocking::Client::builder()
++        .timeout(std::time::Duration::from_secs(30))
++        .build()
++        .map_err(|e| e.to_string())?;
++    let url = format!("{}/chat/completions", endpoint.trim_end_matches('/'));
++
++    let full_prompt = format!("Context: {}\n\nQuestion: {}", context, prompt);
++
++    let body = json!({
++        "model": model,
++        "messages": [
++            {
++                "role": "system",
++                "content": "You are a professional 3D Chemistry Learning Assistant. Answer clearly and concisely."
++            },
++            {
++                "role": "user",
++                "content": full_prompt
++            }
++        ]
++    });
++
++    let mut req = client.post(&url).json(&body);
++    if let Some(key) = api_key {
++        if !key.is_empty() {
++            req = req.bearer_auth(key);
++        }
++    }
++
++    let res = req.send().map_err(|e| e.to_string())?;
++    if !res.status().is_success() {
++        return Err(format!("API error: {}", res.status()));
++    }
++
++    let resp: OpenAIResponse = res.json().map_err(|e| e.to_string())?;
++    let text = resp
++        .choices
++        .first()
++        .map(|c| c.message.content.clone())
++        .ok_or_else(|| "Empty message choice from AI model".to_string())?;
++
++    Ok(text)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn test_gemini_response_deserialization() {
++        let json_str = r#"{
++            "candidates": [
++                {
++                    "content": {
++                        "parts": [
++                            {
++                                "text": "Water molecule formula is H2O."
++                            }
++                        ]
++                    }
++                }
++            ]
++        }"#;
++
++        let resp: GeminiResponse = serde_json::from_str(json_str).unwrap();
++        let text = resp
++            .candidates
++            .first()
++            .and_then(|c| c.content.parts.first())
++            .map(|p| p.text.clone());
++        assert_eq!(text, Some("Water molecule formula is H2O.".to_string()));
++    }
++
++    #[test]
++    fn test_openai_response_deserialization() {
++        let json_str = r#"{
++            "choices": [
++                {
++                    "message": {
++                        "content": "Ethanol is an alcohol with formula C2H5OH."
++                    }
++                }
++            ]
++        }"#;
++
++        let resp: OpenAIResponse = serde_json::from_str(json_str).unwrap();
++        let text = resp
++            .choices
++            .first()
++            .map(|c| c.message.content.clone());
++        assert_eq!(
++            text,
++            Some("Ethanol is an alcohol with formula C2H5OH.".to_string())
++        );
++    }
++
++    #[test]
++    fn test_local_models_deserialization() {
++        let json_str = r#"{
++            "data": [
++                { "id": "llama3:latest" },
++                { "id": "mistral:7b" }
++            ]
++        }"#;
++
++        let resp: LocalModelsResponse = serde_json::from_str(json_str).unwrap();
++        let ids: Vec<String> = resp.data.into_iter().map(|m| m.id).collect();
++        assert_eq!(ids, vec!["llama3:latest", "mistral:7b"]);
++    }
++}
+diff --git a/src-tauri/src/lib.rs b/src-tauri/src/lib.rs
+index 4d6efb2..3d7f942 100644
+--- a/src-tauri/src/lib.rs
++++ b/src-tauri/src/lib.rs
+@@ -1,13 +1,14 @@
+ pub mod db;
+ pub mod pubchem;
+ pub mod chemistry;
++pub mod ai;
+ 
+ use db::{get_db_path, init_db};
+ use pubchem::{fetch_from_pubchem, CompoundData};
+ use rusqlite::{params, Connection};
+ 
+ /// Helper function to check if a query string contains only valid SMILES characters
+ pub fn is_smiles(query: &str) -> bool {
+     let trimmed = query.trim();
+     if trimmed.is_empty() {
+         return false;
+@@ -225,33 +226,122 @@ fn get_note(app_handle: tauri::AppHandle, compound_id: i32) -> Result<String, St
+         .prepare("SELECT content FROM user_notes WHERE compound_id = ?")
+         .map_err(|e| e.to_string())?;
+     let note: Result<String, rusqlite::Error> =
+         stmt.query_row(params![compound_id], |row| row.get(0));
+     match note {
+         Ok(content) => Ok(content),
+         Err(_) => Ok("".to_string()),
+     }
+ }
+ 
++#[tauri::command]
++fn save_setting(app_handle: tauri::AppHandle, key: String, value: String) -> Result<(), String> {
++    let db_path = get_db_path(&app_handle);
++    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
++    conn.execute(
++        "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)",
++        params![key, value],
++    )
++    .map_err(|e| e.to_string())?;
++    Ok(())
++}
++
++#[tauri::command]
++fn get_setting(app_handle: tauri::AppHandle, key: String) -> Result<String, String> {
++    let db_path = get_db_path(&app_handle);
++    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
++    let mut stmt = conn
++        .prepare("SELECT value FROM app_settings WHERE key = ?")
++        .map_err(|e| e.to_string())?;
++    let val: Result<String, rusqlite::Error> = stmt.query_row(params![key], |row| row.get(0));
++    match val {
++        Ok(v) => Ok(v),
++        Err(_) => Ok("".to_string()),
++    }
++}
++
++#[tauri::command]
++fn test_local_connection(endpoint: String) -> Result<Vec<String>, String> {
++    ai::test_connection(&endpoint)
++}
++
++#[tauri::command]
++fn query_ai(
++    app_handle: tauri::AppHandle,
++    provider: String,
++    prompt: String,
++    model: String,
++    context: String,
++) -> Result<String, String> {
++    let db_path = get_db_path(&app_handle);
++    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
++
++    match provider.as_str() {
++        "gemini" => {
++            let mut stmt = conn
++                .prepare("SELECT value FROM app_settings WHERE key = 'gemini_api_key'")
++                .map_err(|e| e.to_string())?;
++            let key: String = stmt
++                .query_row([], |row| row.get(0))
++                .map_err(|_| "Gemini API Key missing in settings.".to_string())?;
++            ai::call_gemini(&key, &model, &prompt, &context)
++        }
++        "openai" => {
++            let mut stmt = conn
++                .prepare("SELECT value FROM app_settings WHERE key = 'openai_api_key'")
++                .map_err(|e| e.to_string())?;
++            let key: String = stmt
++                .query_row([], |row| row.get(0))
++                .map_err(|_| "OpenAI API Key missing in settings.".to_string())?;
++            ai::call_openai_compatible(
++                "https://api.openai.com/v1",
++                Some(&key),
++                &model,
++                &prompt,
++                &context,
++            )
++        }
++        "local" => {
++            let mut stmt_url = conn
++                .prepare("SELECT value FROM app_settings WHERE key = 'local_ai_url'")
++                .map_err(|e| e.to_string())?;
++            let raw_url: String = stmt_url
++                .query_row([], |row| row.get(0))
++                .unwrap_or_else(|_| "http://localhost:11434/v1".to_string());
++            let url = if raw_url.trim().is_empty() {
++                "http://localhost:11434/v1".to_string()
++            } else {
++                raw_url
++            };
++            ai::call_openai_compatible(&url, None, &model, &prompt, &context)
++        }
++        _ => Err("Invalid AI Provider".to_string()),
++    }
++}
++
+ #[cfg_attr(mobile, tauri::mobile_entry_point)]
+ pub fn run() {
+     tauri::Builder::default()
+         .plugin(tauri_plugin_opener::init())
+         .setup(|app| {
+             init_db(app.handle()).expect("Failed to initialize database");
+             Ok(())
+         })
+         .invoke_handler(tauri::generate_handler![
+             search_compound,
+             get_search_history,
+             save_note,
+-            get_note
++            get_note,
++            save_setting,
++            get_setting,
++            test_local_connection,
++            query_ai
+         ])
+         .run(tauri::generate_context!())
+         .expect("error while running tauri application");
+ }
+ 
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+ 
+     #[test]
