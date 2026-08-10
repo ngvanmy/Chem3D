@@ -171,9 +171,60 @@ pub fn parse_sdf(sdf: &str) -> (Vec<AtomData>, Vec<BondData>) {
     (atoms, bonds)
 }
 
+#[derive(Deserialize)]
+pub struct PubChemAutocompleteResponse {
+    #[serde(rename = "dictionary_terms")]
+    pub dictionary_terms: Option<PubChemDictTerms>,
+}
+
+#[derive(Deserialize)]
+pub struct PubChemDictTerms {
+    pub compound: Option<Vec<String>>,
+}
+
+pub fn get_autocomplete_from_pubchem(query: &str) -> Result<Vec<String>, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(4))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let url = format!(
+        "https://pubchem.ncbi.nlm.nih.gov/rest/autocomplete/compound/{}/json?limit=6",
+        urlencoding::encode(query)
+    );
+
+    let res = client.get(&url).send().map_err(|e| e.to_string())?;
+    if !res.status().is_success() {
+        return Err(format!("PubChem autocomplete API error: {}", res.status()));
+    }
+
+    let autocomplete_data: PubChemAutocompleteResponse = res.json().map_err(|e| e.to_string())?;
+    let terms = autocomplete_data.dictionary_terms
+        .and_then(|dt| dt.compound)
+        .unwrap_or_default();
+
+    Ok(terms)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_autocomplete_deserialization() {
+        let mock_json = r#"
+        {
+            "dictionary_terms": {
+                "compound": ["water", "water-d2", "water-18o"]
+            }
+        }
+        "#;
+        let autocomplete_data: PubChemAutocompleteResponse = serde_json::from_str(mock_json).unwrap();
+        let terms = autocomplete_data.dictionary_terms.unwrap().compound.unwrap();
+        assert_eq!(terms.len(), 3);
+        assert_eq!(terms[0], "water");
+    }
+
 
     #[test]
     fn test_parse_sdf_sample() {

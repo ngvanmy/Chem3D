@@ -346,6 +346,45 @@ fn query_ai(
     }
 }
 
+#[tauri::command]
+fn get_autocomplete_suggestions(app_handle: tauri::AppHandle, query: String) -> Result<Vec<String>, String> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // 1. Attempt PubChem online first
+    if let Ok(suggestions) = pubchem::get_autocomplete_from_pubchem(trimmed) {
+        if !suggestions.is_empty() {
+            return Ok(suggestions);
+        }
+    }
+
+    // 2. Local SQLite fallback
+    let db_path = get_db_path(&app_handle);
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT canonical_name FROM compounds 
+             WHERE canonical_name LIKE ?1 OR common_name LIKE ?1 OR formula = ?2
+             LIMIT 6",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map(params![format!("%{}%", trimmed), trimmed], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+
+    let mut suggestions = Vec::new();
+    for r in rows {
+        if let Ok(name) = r {
+            suggestions.push(name);
+        }
+    }
+
+    Ok(suggestions)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -362,7 +401,8 @@ pub fn run() {
             save_setting,
             get_setting,
             test_local_connection,
-            query_ai
+            query_ai,
+            get_autocomplete_suggestions
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -371,6 +411,41 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_local_autocomplete_fallback() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE compounds (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                canonical_name TEXT UNIQUE NOT NULL,
+                common_name TEXT,
+                formula TEXT,
+                smiles TEXT UNIQUE NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO compounds (canonical_name, common_name, formula, smiles) VALUES ('Ethanol', 'ethanol', 'C2H5OH', 'CCO')",
+            [],
+        )
+        .unwrap();
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT canonical_name FROM compounds 
+                 WHERE canonical_name LIKE ?1 OR common_name LIKE ?1 OR formula = ?2
+                 LIMIT 6",
+            )
+            .unwrap();
+
+        let rows = stmt.query_map(params![format!("%{}%", "eth"), "eth"], |row| row.get(0)).unwrap();
+        let suggestions: Vec<String> = rows.filter_map(|r| r.ok()).collect();
+        assert_eq!(suggestions, vec!["Ethanol"]);
+    }
+
 
     #[test]
     fn test_search_history_ordering_query() {

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { MoleculeViewer } from './components/MoleculeViewer';
 import { Settings } from './components/Settings';
@@ -23,6 +23,11 @@ interface CompoundData {
 function App() {
   const [query, setQuery] = useState('');
   const [compound, setCompound] = useState<CompoundData | null>(null);
+  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [activeSuggestionIdx, setActiveSuggestionIdx] = useState(-1);
+  const searchRef = useRef<HTMLDivElement>(null);
+
   const [history, setHistory] = useState<string[]>([]);
   const [note, setNote] = useState('');
   const [showSettings, setShowSettings] = useState(false);
@@ -39,6 +44,64 @@ function App() {
   useEffect(() => {
     loadHistory();
   }, []);
+
+  // Autocomplete Suggestions Debounce Query
+  useEffect(() => {
+    if (!query.trim()) {
+      setSuggestions([]);
+      return;
+    }
+    const delayDebounceFn = setTimeout(async () => {
+      try {
+        const list = await invoke<string[]>('get_autocomplete_suggestions', { query: query.trim() });
+        setSuggestions(list);
+        setActiveSuggestionIdx(-1);
+      } catch (err) {
+        console.error(err);
+      }
+    }, 250);
+
+    return () => clearTimeout(delayDebounceFn);
+  }, [query]);
+
+  // Click Outside suggestions list listener
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (searchRef.current && !searchRef.current.contains(event.target as Node)) {
+        setShowSuggestions(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (showSuggestions && suggestions.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setActiveSuggestionIdx((prev) => (prev < suggestions.length - 1 ? prev + 1 : 0));
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setActiveSuggestionIdx((prev) => (prev > 0 ? prev - 1 : suggestions.length - 1));
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        if (activeSuggestionIdx >= 0 && activeSuggestionIdx < suggestions.length) {
+          const selected = suggestions[activeSuggestionIdx];
+          setQuery(selected);
+          setShowSuggestions(false);
+          handleSearch(selected);
+        } else {
+          setShowSuggestions(false);
+          handleSearch(query);
+        }
+      } else if (e.key === 'Escape') {
+        setShowSuggestions(false);
+      }
+    } else if (e.key === 'Enter') {
+      handleSearch(query);
+    }
+  };
+
 
   const handleSearch = async (searchQuery: string) => {
     if (!searchQuery.trim() || loading) return;
@@ -97,17 +160,43 @@ function App() {
 
         {/* Sidebar */}
         <div className="w-64 bg-slate-900 border-r border-slate-800 flex flex-col p-4">
-          <div className="relative mb-6">
+          <div className="relative mb-6" ref={searchRef}>
             <input
               type="text"
               value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleSearch(query)}
+              onChange={(e) => {
+                setQuery(e.target.value);
+                setShowSuggestions(true);
+              }}
+              onFocus={() => setShowSuggestions(true)}
+              onKeyDown={handleKeyDown}
               placeholder="Nhập tên hoặc SMILES..."
               className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-9 pr-3 py-2 text-sm focus:outline-none focus:border-emerald-500 text-white placeholder-slate-500"
             />
             <Search className="absolute left-3 top-2.5 text-slate-500 w-4 h-4" />
+
+            {showSuggestions && suggestions.length > 0 && (
+              <ul className="absolute left-0 right-0 top-full mt-1 bg-slate-900/95 border border-slate-800 rounded-lg shadow-xl overflow-hidden z-50 divide-y divide-slate-800/50 backdrop-blur-md max-h-60 overflow-y-auto">
+                {suggestions.map((s, i) => (
+                  <li key={i}>
+                    <button
+                      onClick={() => {
+                        setQuery(s);
+                        setShowSuggestions(false);
+                        handleSearch(s);
+                      }}
+                      className={`w-full text-left px-3 py-2 text-sm text-slate-300 hover:text-emerald-400 hover:bg-slate-800/80 transition duration-150 ${
+                        i === activeSuggestionIdx ? 'bg-slate-800/90 text-emerald-400 font-medium' : ''
+                      }`}
+                    >
+                      {s}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
+
 
           <div className="flex-1 overflow-y-auto">
             <div className="flex items-center gap-2 text-xs text-slate-400 font-semibold mb-3 uppercase tracking-wider">
