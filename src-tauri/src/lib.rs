@@ -292,10 +292,24 @@ fn query_ai(
             let key: String = stmt
                 .query_row([], |row| row.get(0))
                 .map_err(|_| "OpenAI API Key missing in settings.".to_string())?;
+
+            let model_name = if model.trim().is_empty() {
+                let mut stmt_model = conn
+                    .prepare("SELECT value FROM app_settings WHERE key = 'openai_model'")
+                    .map_err(|e| e.to_string())?;
+                let saved: Result<String, _> = stmt_model.query_row([], |row| row.get(0));
+                match saved {
+                    Ok(m) if !m.trim().is_empty() => m,
+                    _ => "gpt-4o-mini".to_string(),
+                }
+            } else {
+                model
+            };
+
             ai::call_openai_compatible(
                 "https://api.openai.com/v1",
                 Some(&key),
-                &model,
+                &model_name,
                 &prompt,
                 &context,
             )
@@ -312,7 +326,21 @@ fn query_ai(
             } else {
                 raw_url
             };
-            ai::call_openai_compatible(&url, None, &model, &prompt, &context)
+
+            let model_name = if model.trim().is_empty() {
+                let mut stmt_model = conn
+                    .prepare("SELECT value FROM app_settings WHERE key = 'local_ai_model'")
+                    .map_err(|e| e.to_string())?;
+                let saved: Result<String, _> = stmt_model.query_row([], |row| row.get(0));
+                match saved {
+                    Ok(m) if !m.trim().is_empty() => m,
+                    _ => "llama3".to_string(),
+                }
+            } else {
+                model
+            };
+
+            ai::call_openai_compatible(&url, None, &model_name, &prompt, &context)
         }
         _ => Err("Invalid AI Provider".to_string()),
     }
@@ -477,6 +505,44 @@ mod tests {
         assert!(!is_smiles("Ethanol"));
         assert!(!is_smiles("Aspirin"));
         assert!(!is_smiles(""));
+    }
+
+    #[test]
+    fn test_model_fallback_resolution() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )",
+            [],
+        )
+        .unwrap();
+
+        // 1. Without saved setting -> default to llama3
+        let saved: Result<String, _> = conn.query_row(
+            "SELECT value FROM app_settings WHERE key = 'local_ai_model'",
+            [],
+            |row| row.get(0),
+        );
+        let resolved_local = match saved {
+            Ok(m) if !m.trim().is_empty() => m,
+            _ => "llama3".to_string(),
+        };
+        assert_eq!(resolved_local, "llama3");
+
+        // 2. With saved setting -> resolve saved model
+        conn.execute("INSERT INTO app_settings (key, value) VALUES ('local_ai_model', 'phi3')", []).unwrap();
+        let saved_2: Result<String, _> = conn.query_row(
+            "SELECT value FROM app_settings WHERE key = 'local_ai_model'",
+            [],
+            |row| row.get(0),
+        );
+        let resolved_local_2 = match saved_2 {
+            Ok(m) if !m.trim().is_empty() => m,
+            _ => "llama3".to_string(),
+        };
+        assert_eq!(resolved_local_2, "phi3");
     }
 }
 

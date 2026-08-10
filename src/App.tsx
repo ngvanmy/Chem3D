@@ -53,6 +53,7 @@ function App() {
       const savedNote = await invoke<string>('get_note', { compoundId: data.id });
       setNote(savedNote);
     } catch (err: any) {
+      setCompound(null);
       setErrorMsg('Không tìm thấy hợp chất: ' + err.toString());
     } finally {
       setLoading(false);
