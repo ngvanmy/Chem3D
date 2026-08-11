@@ -79,11 +79,27 @@ pub fn generate_fallback_coordinates(smiles: &str) -> (Vec<AtomData>, Vec<BondDa
     while i < chars.len() {
         let c = chars[i];
 
-        // Handle two-character elements like Cl, Br
+        // Handle two-character elements like Cl, Br, Na, Mg, Ca, Si, Fe, Cu, Zn, Li
         let (elem_str, skip) = if c == 'C' && i + 1 < chars.len() && chars[i + 1] == 'l' {
             ("Cl", 1)
         } else if c == 'B' && i + 1 < chars.len() && chars[i + 1] == 'r' {
             ("Br", 1)
+        } else if c == 'N' && i + 1 < chars.len() && chars[i + 1] == 'a' {
+            ("Na", 1)
+        } else if c == 'M' && i + 1 < chars.len() && chars[i + 1] == 'g' {
+            ("Mg", 1)
+        } else if c == 'C' && i + 1 < chars.len() && chars[i + 1] == 'a' {
+            ("Ca", 1)
+        } else if c == 'S' && i + 1 < chars.len() && chars[i + 1] == 'i' {
+            ("Si", 1)
+        } else if c == 'F' && i + 1 < chars.len() && chars[i + 1] == 'e' {
+            ("Fe", 1)
+        } else if c == 'C' && i + 1 < chars.len() && chars[i + 1] == 'u' {
+            ("Cu", 1)
+        } else if c == 'Z' && i + 1 < chars.len() && chars[i + 1] == 'n' {
+            ("Zn", 1)
+        } else if c == 'L' && i + 1 < chars.len() && chars[i + 1] == 'i' {
+            ("Li", 1)
         } else {
             let element = match c {
                 'C' | 'c' => Some("C"),
@@ -93,6 +109,9 @@ pub fn generate_fallback_coordinates(smiles: &str) -> (Vec<AtomData>, Vec<BondDa
                 'F' => Some("F"),
                 'P' | 'p' => Some("P"),
                 'H' => Some("H"),
+                'I' => Some("I"),
+                'B' | 'b' => Some("B"),
+                'K' | 'k' => Some("K"),
                 _ => None,
             };
 
@@ -193,4 +212,17 @@ mod tests {
         assert_eq!(bonds[1].source, 1);
         assert_eq!(bonds[1].target, 2);
     }
+
+    #[test]
+    fn test_fallback_coordinates_new_elements() {
+        let smiles = "Na[Cl]CaMgFeCuZnLiI[B]K";
+        let (atoms, _bonds) = generate_fallback_coordinates(smiles);
+        
+        let elements: Vec<&str> = atoms.iter().map(|a| a.element.as_str()).collect();
+        assert_eq!(
+            elements,
+            vec!["Na", "Cl", "Ca", "Mg", "Fe", "Cu", "Zn", "Li", "I", "B", "K"]
+        );
+    }
 }
+
