@@ -368,10 +368,14 @@ fn get_autocomplete_suggestions(app_handle: tauri::AppHandle, query: String) -> 
         return Ok(vec![]);
     }
 
+    let mut suggestions = translation::suggest_vietnamese_names(trimmed);
+
     // 1. Attempt PubChem online first
-    if let Ok(suggestions) = pubchem::get_autocomplete_from_pubchem(trimmed) {
-        if !suggestions.is_empty() {
-            return Ok(suggestions);
+    if let Ok(online_sug) = pubchem::get_autocomplete_from_pubchem(trimmed) {
+        for s in online_sug {
+            if !suggestions.contains(&s) {
+                suggestions.push(s);
+            }
         }
     }
 
@@ -390,13 +394,15 @@ fn get_autocomplete_suggestions(app_handle: tauri::AppHandle, query: String) -> 
         .query_map(params![format!("%{}%", trimmed), trimmed], |row| row.get(0))
         .map_err(|e| e.to_string())?;
 
-    let mut suggestions = Vec::new();
     for r in rows {
         if let Ok(name) = r {
-            suggestions.push(name);
+            if !suggestions.contains(&name) {
+                suggestions.push(name);
+            }
         }
     }
 
+    suggestions.truncate(6);
     Ok(suggestions)
 }
 
