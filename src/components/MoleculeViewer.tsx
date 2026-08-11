@@ -21,27 +21,7 @@ interface MoleculeViewerProps {
   bonds: Bond[];
 }
 
-const ELEMENT_COLORS: Record<string, string> = {
-  H: '#ffffff', // White
-  C: '#808080', // Gray
-  O: '#ff0000', // Red
-  N: '#0000ff', // Blue
-  S: '#ffff00', // Yellow
-  P: '#ff8000', // Orange
-  F: '#00ff00',
-  Cl: '#00cc00',
-  Br: '#990000',
-  I: '#660099',
-};
-
-const ELEMENT_RADII: Record<string, number> = {
-  H: 0.3,
-  C: 0.6,
-  O: 0.5,
-  N: 0.55,
-  S: 0.7,
-  P: 0.65,
-};
+import { ELEMENT_COLORS, ELEMENT_RADII } from '../utils/elements';
 
 const CylinderBond: React.FC<{ start: [number, number, number]; end: [number, number, number] }> = ({ start, end }) => {
   const pStart = new THREE.Vector3(...start);
@@ -70,7 +50,7 @@ export const MoleculeViewer: React.FC<MoleculeViewerProps> = ({ atoms, bonds }) 
         <directionalLight position={[-10, -10, -10]} intensity={0.3} />
         <group>
           {atoms.map((atom, idx) => {
-            const color = ELEMENT_COLORS[atom.element] || '#ff00ff';
+            const color = ELEMENT_COLORS[atom.element] || '#909090';
             const radius = ELEMENT_RADII[atom.element] || 0.5;
             return (
               <mesh key={idx} position={[atom.x, atom.y, atom.z]}>
