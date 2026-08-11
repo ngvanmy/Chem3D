@@ -1,169 +1,70 @@
-### Task 3: Local SMILES parser & Offline 3D coordinate generator
+### Task 3: Tích hợp gợi ý từ tiền tố tiếng Việt vào Autocomplete Suggestions
 
 **Files:**
-- Create: `d:\Chem3D\src-tauri\src\chemistry.rs`
-- Modify: `d:\Chem3D\src-tauri\src\lib.rs`, `d:\Chem3D\src-tauri\src\pubchem.rs`
-- Test: Unit tests in `chemistry.rs` to verify SMILES parser matching.
+- Modify: `src-tauri/src/lib.rs` (hàm `get_autocomplete_suggestions`)
 
 **Interfaces:**
-- Consumes: `pubchem::CompoundData`
-- Produces: `pub fn detect_functional_groups(smiles: &str) -> Vec<String>` inside Rust backend and integration with `search_compound` when PubChem coordinate extraction fails.
+- Consumes: `translation::suggest_vietnamese_names` từ `translation.rs`.
+- Produces: Hàm `get_autocomplete_suggestions` trả về danh sách kết hợp gợi ý tiếng Việt và PubChem/Local.
 
-- [ ] **Step 1: Create Rust SMILES pattern matcher**
+- [ ] **Step 1: Cập nhật hàm `get_autocomplete_suggestions` trong `src-tauri/src/lib.rs`**
 
-Create `d:\Chem3D\src-tauri\src\chemistry.rs`:
+Cập nhật hàm `get_autocomplete_suggestions` (dòng 350-386) để chèn gợi ý tiếng Việt vào đầu:
 ```rust
-use crate::pubchem::{AtomData, BondData};
-
-// Identify functional groups using SMILES patterns
-pub fn detect_functional_groups(smiles: &str) -> Vec<String> {
-    let mut groups = Vec::new();
-    let smiles_upper = smiles.to_uppercase();
-
-    // 1. Carboxylic Acid (C(=O)O or COOH)
-    if smiles_upper.contains("C(=O)O") || smiles_upper.contains("COOH") {
-        groups.push("Carboxylic Acid".to_string());
+#[tauri::command]
+fn get_autocomplete_suggestions(app_handle: tauri::AppHandle, query: String) -> Result<Vec<String>, String> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Ok(vec![]);
     }
 
-    // 2. Alcohol (C-OH)
-    if smiles_upper.contains("O") {
-        // Simple check: oxygen connected to carbon but not double-bonded in C(=O)
-        let is_alcohol = smiles_upper.contains("CO") || smiles_upper.contains("OC") || smiles_upper.contains("CCO");
-        let is_carbonyl = smiles_upper.contains("C(=O)");
-        if is_alcohol && (!is_carbonyl || smiles_upper.matches("O").count() > 1) {
-            groups.push("Alcohol".to_string());
-        }
-    }
+    let mut suggestions = translation::suggest_vietnamese_names(trimmed);
 
-    // 3. Aldehyde / Ketone (Carbonyl C=O)
-    if smiles_upper.contains("C(=O)") {
-        if smiles_upper.contains("C(=O)H") || smiles_upper.ends_with("=O") {
-            groups.push("Aldehyde".to_string());
-        } else {
-            groups.push("Ketone/Carbonyl".to_string());
-        }
-    }
-
-    // 4. Benzene ring / Aromatic
-    if smiles.contains("c1ccccc1") || smiles_upper.contains("C1=CC=CC=C1") {
-        groups.push("Benzene ring (Aromatic)".to_string());
-    }
-
-    // 5. Alkene (Double bonds between carbons)
-    if smiles.contains("C=C") {
-        groups.push("Alkene".to_string());
-    }
-
-    // 6. Alkyne (Triple bonds between carbons)
-    if smiles.contains("C#C") {
-        groups.push("Alkyne".to_string());
-    }
-
-    if groups.is_empty() {
-        groups.push("Alkane".to_string());
-    }
-
-    groups
-}
-
-// Basic coordinate generator for offline fallback
-pub fn generate_fallback_coordinates(smiles: &str) -> (Vec<AtomData>, Vec<BondData>) {
-    let mut atoms = Vec::new();
-    let mut bonds = Vec::new();
-
-    // Fallback: Just place atoms along a line with alternating offset coordinates
-    // Parse SMILES characters and create nodes
-    let chars: Vec<char> = smiles.chars().collect();
-    let mut i = 0;
-    let mut atom_idx = 0;
-
-    while i < chars.len() {
-        let c = chars[i];
-        let element = match c {
-            'C' | 'c' => Some("C"),
-            'O' | 'o' => Some("O"),
-            'N' | 'n' => Some("N"),
-            'S' | 's' => Some("S"),
-            'F' => Some("F"),
-            'H' => Some("H"),
-            _ => None,
-        };
-
-        if let Some(el) = element {
-            let offset_y = if atom_idx % 2 == 0 { 0.5 } else { -0.5 };
-            atoms.push(AtomData {
-                element: el.to_string(),
-                x: (atom_idx as f64) * 1.5,
-                y: offset_y,
-                z: 0.0,
-            });
-
-            if atom_idx > 0 {
-                bonds.push(BondData {
-                    source: atom_idx - 1,
-                    target: atom_idx,
-                    r#type: 1,
-                });
+    // 1. Attempt PubChem online first
+    if let Ok(online_sug) = pubchem::get_autocomplete_from_pubchem(trimmed) {
+        for s in online_sug {
+            if !suggestions.contains(&s) {
+                suggestions.push(s);
             }
-            atom_idx += 1;
         }
-        i += 1;
     }
 
-    (atoms, bonds)
+    // 2. Local SQLite fallback
+    let db_path = get_db_path(&app_handle);
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT canonical_name FROM compounds 
+             WHERE canonical_name LIKE ?1 OR common_name LIKE ?1 OR formula = ?2
+             LIMIT 6",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map(params![format!("%{}%", trimmed), trimmed], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+
+    for r in rows {
+        if let Ok(name) = r {
+            if !suggestions.contains(&name) {
+                suggestions.push(name);
+            }
+        }
+    }
+
+    suggestions.truncate(6);
+    Ok(suggestions)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_alcohol_detection() {
-        let smiles = "CCO"; // Ethanol
-        let groups = detect_functional_groups(smiles);
-        assert!(groups.contains(&"Alcohol".to_string()));
-    }
-
-    #[test]
-    fn test_carboxylic_detection() {
-        let smiles = "CC(=O)O"; // Acetic Acid
-        let groups = detect_functional_groups(smiles);
-        assert!(groups.contains(&"Carboxylic Acid".to_string()));
-    }
-}
 ```
 
-- [ ] **Step 2: Update Search Compound command to use SMILES module**
+- [ ] **Step 2: Chạy test suite**
 
-Modify `d:\Chem3D\src-tauri\src\lib.rs`:
-1. Add `pub mod chemistry;` at the top.
-2. In `search_compound`:
-   - Compute functional groups: `pubchem_comp.functional_groups = chemistry::detect_functional_groups(&pubchem_comp.smiles);`
-   - If `pubchem_comp.atoms` is empty, generate coordinates offline:
-     ```rust
-     if pubchem_comp.atoms.is_empty() {
-         let (atoms, bonds) = chemistry::generate_fallback_coordinates(&pubchem_comp.smiles);
-         pubchem_comp.atoms = atoms;
-         pubchem_comp.bonds = bonds;
-     }
-     ```
+Run: `cargo test --manifest-path src-tauri/Cargo.toml`
+Expected: PASS.
 
-- [ ] **Step 3: Run Rust cargo tests**
+- [ ] **Step 3: Commit Task 3**
 
-Run:
-```powershell
-cd src-tauri
-cargo test
+```bash
+git add src-tauri/src/lib.rs
+git commit -m "feat: integrate Vietnamese prefix matching in autocomplete suggestions"
 ```
-Expected: Tests pass.
-
-- [ ] **Step 4: Commit**
-
-Run:
-```powershell
-git add src-tauri
-git commit -m "feat: add local SMILES functional group parser and offline 3D coordinate fallback"
-```
-
----
-

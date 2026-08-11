@@ -1,7 +1,5 @@
-# Chem3D-Tauri Progress Ledger
+# Progress Ledger - Common Name Search
 
-- Task 1: complete (commits 27881dc..c012344, review clean)
-- Task 2: complete (commits c012344..315c83f, review clean)
-- Task 3: complete (commits 315c83f..88c8fd7, review clean)
-- Task 4: complete (commits 88c8fd7..50143be, review clean)
-- Task 5: complete (commits 50143be..c4648d8, review clean)
+- [x] Task 1: Khởi tạo module dịch thuật Rust: src-tauri/src/translation.rs (commits 0227538..99c5f15, review clean)
+- [x] Task 2: Tích hợp dịch thuật vào hàm tìm kiếm search_compound (commits 99c5f15..b62d07f, review clean)
+- [x] Task 3: Tích hợp gợi ý từ tiền tố tiếng Việt vào Autocomplete Suggestions (commits b62d07f..7930a23, review clean)
