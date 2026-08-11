@@ -2,6 +2,7 @@ pub mod db;
 pub mod pubchem;
 pub mod chemistry;
 pub mod ai;
+pub mod translation;
 
 use db::{get_db_path, init_db};
 use pubchem::{fetch_from_pubchem, CompoundData};
