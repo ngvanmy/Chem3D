@@ -56,6 +56,14 @@ fn search_compound(app_handle: tauri::AppHandle, query: String) -> Result<Compou
     )
     .ok();
 
+    let mut search_term = query.clone();
+    let is_translated = if let Some(translated) = translation::translate_vietnamese_name(&query) {
+        search_term = translated.to_string();
+        true
+    } else {
+        false
+    };
+
     // 2. Query in local compounds DB first
     let mut stmt = conn
         .prepare(
@@ -64,11 +72,11 @@ fn search_compound(app_handle: tauri::AppHandle, query: String) -> Result<Compou
                     p.atoms_json, p.bonds_json
              FROM compounds c
              LEFT JOIN properties p ON c.id = p.compound_id
-             WHERE c.canonical_name LIKE ?1 OR c.common_name LIKE ?1 OR c.formula = ?2",
+             WHERE c.canonical_name LIKE ?1 OR c.common_name LIKE ?1 OR c.formula = ?2 OR c.canonical_name LIKE ?3 OR c.common_name LIKE ?3",
         )
         .map_err(|e| e.to_string())?;
 
-    let local_res = stmt.query_row(params![format!("%{}%", query), query], |row| {
+    let local_res = stmt.query_row(params![format!("%{}%", search_term), search_term, format!("%{}%", query)], |row| {
         let f_groups_json: String = row.get(9).unwrap_or_else(|_| "[]".to_string());
         let f_groups: Vec<String> = serde_json::from_str(&f_groups_json).unwrap_or_default();
         let atoms_json: String = row.get(10).unwrap_or_else(|_| "[]".to_string());
@@ -104,17 +112,17 @@ fn search_compound(app_handle: tauri::AppHandle, query: String) -> Result<Compou
     }
 
     // 3. Crawler PubChem or offline fallback
-    let mut pubchem_comp = match fetch_from_pubchem(&query) {
+    let mut pubchem_comp = match fetch_from_pubchem(&search_term) {
         Ok(comp) => comp,
         Err(_err) => {
-            if is_smiles(&query) {
-                let (atoms, bonds) = chemistry::generate_fallback_coordinates(&query);
+            if is_smiles(&search_term) {
+                let (atoms, bonds) = chemistry::generate_fallback_coordinates(&search_term);
                 CompoundData {
                     id: 0,
-                    canonical_name: query.clone(),
+                    canonical_name: search_term.clone(),
                     common_name: query.clone(),
                     formula: "".to_string(),
-                    smiles: query.clone(),
+                    smiles: search_term.clone(),
                     mw: 0.0,
                     logp: None,
                     boiling_point: None,
@@ -125,8 +133,8 @@ fn search_compound(app_handle: tauri::AppHandle, query: String) -> Result<Compou
                 }
             } else {
                 return Err(format!(
-                    "Offline: Could not find compound '{}' locally and cannot search PubChem.",
-                    query
+                    "Offline: Could not find compound '{}' (translated: '{}') locally and cannot search PubChem.",
+                    query, search_term
                 ));
             }
         }
@@ -143,11 +151,17 @@ fn search_compound(app_handle: tauri::AppHandle, query: String) -> Result<Compou
     }
 
     // 4. Save to Database
+    let saved_common_name = if is_translated {
+        query.clone()
+    } else {
+        pubchem_comp.common_name.clone()
+    };
+
     conn.execute(
         "INSERT OR IGNORE INTO compounds (canonical_name, common_name, formula, smiles) VALUES (?, ?, ?, ?)",
         params![
             pubchem_comp.canonical_name,
-            pubchem_comp.common_name,
+            saved_common_name,
             pubchem_comp.formula,
             pubchem_comp.smiles
         ],
@@ -621,6 +635,13 @@ mod tests {
             _ => "llama3".to_string(),
         };
         assert_eq!(resolved_local_2, "phi3");
+    }
+
+    #[test]
+    fn test_search_compound_translation() {
+        let query = "nước";
+        let translated = translation::translate_vietnamese_name(query).unwrap();
+        assert_eq!(translated, "water");
     }
 }
 
